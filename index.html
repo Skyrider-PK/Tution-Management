@@ -404,13 +404,13 @@ const MONTH_NAMES = ["January","February","March","April","May","June","July","A
 const STORE_KEYS = {
   teachers:"teachers", students:"students", templates:"timetableTemplates",
   studentTT:"studentTimetables", homework:"homework", payments:"payments",
-  attendance:"attendance", tests:"testResults"
+  attendance:"attendance", tests:"testResults", aiKeys:"aiKeys"
 };
 
 /* =========================================================
    STATE
 ========================================================= */
-let DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[] };
+let DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], aiKeys:{} };
 let STATE = { view:"dashboard", selectedId:null, detailTab:null, search:"", paymentsMonth:new Date(), attMonth:new Date(), hwFilter:{}, reportTab:"earnings", reportMonth:new Date() };
 
 /* =========================================================
@@ -1787,12 +1787,13 @@ const AI_PROVIDERS = {
 };
 
 function getStoredApiKey(providerId){
-  const p = AI_PROVIDERS[providerId]; if(!p) return '';
-  try{ return localStorage.getItem(p.lsKey) || ''; }catch(e){ return ''; }
+  return (DATA.aiKeys && DATA.aiKeys[providerId]) || '';
 }
 function saveApiKey(providerId, key){
-  const p = AI_PROVIDERS[providerId]; if(!p) return;
-  try{ if(key) localStorage.setItem(p.lsKey, key); else localStorage.removeItem(p.lsKey); }catch(e){}
+  if(!AI_PROVIDERS[providerId]) return;
+  if(key) DATA.aiKeys[providerId] = key;
+  else delete DATA.aiKeys[providerId];
+  save(STORE_KEYS.aiKeys);
 }
 function removeApiKey(providerId){ saveApiKey(providerId, ''); }
 function configuredProviders(){ return Object.keys(AI_PROVIDERS).filter(id=>getStoredApiKey(id)); }
@@ -2566,7 +2567,7 @@ async function importBackup(file){
 async function resetAllData(){
   if(!confirm("This permanently deletes ALL data. Are you absolutely sure?")) return;
   if(!confirm("Last check — this cannot be undone. Clear everything?")) return;
-  DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[] };
+  DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], aiKeys:{} };
   await Promise.all(Object.values(STORE_KEYS).map(k=>save(k)));
   showToast("All data cleared");
   go('dashboard');
