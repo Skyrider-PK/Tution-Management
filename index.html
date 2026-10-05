@@ -1789,11 +1789,11 @@ const AI_PROVIDERS = {
 function getStoredApiKey(providerId){
   return (DATA.aiKeys && DATA.aiKeys[providerId]) || '';
 }
-function saveApiKey(providerId, key){
+async function saveApiKey(providerId, key){
   if(!AI_PROVIDERS[providerId]) return;
   if(key) DATA.aiKeys[providerId] = key;
   else delete DATA.aiKeys[providerId];
-  save(STORE_KEYS.aiKeys);
+  await save(STORE_KEYS.aiKeys);
 }
 function removeApiKey(providerId){ saveApiKey(providerId, ''); }
 function configuredProviders(){ return Object.keys(AI_PROVIDERS).filter(id=>getStoredApiKey(id)); }
@@ -1993,7 +1993,7 @@ function viewAIHelper(){
       <div class="panel">
         <div class="panel-title mb8">Configure API Key</div>
         <div class="muted mb12" style="font-size:12.5px">
-          <b>Security notice:</b> This is a browser-based app. API keys entered here are stored in your browser's Local Storage and sent directly from your browser to the provider's API — they are not sent to any other server. However, keys stored in a browser cannot be considered completely secret. Restrict your keys using the provider's API/referrer restrictions where available, and monitor your usage regularly.
+          <b>Security notice:</b> API keys are saved to your Supabase database (if connected) and your browser's local storage. They are sent directly from your browser to the AI provider's API only — not to any other server. Restrict your keys using the provider's API restrictions where available, and monitor your usage regularly.
           <br/><br/>Availability of free usage depends on the provider's current pricing and account terms.
         </div>
         <div class="field mb8"><label>Provider</label>
@@ -2801,14 +2801,14 @@ function bindGlobalEvents(){
     const pid = (document.getElementById('ai-settings-provider')||{}).value;
     const val = (document.getElementById('ai-settings-key')||{}).value.trim();
     if(!pid||!val){ showToast('Select a provider and paste a key first.'); return; }
-    saveApiKey(pid, val); showToast((AI_PROVIDERS[pid]||{}).label+' key saved'); render();
+    saveApiKey(pid, val).then(()=>{ showToast((AI_PROVIDERS[pid]||{}).label+' key saved'); render(); });
   });
   // Remove key
   const aiKeyRemove = document.getElementById('ai-key-remove');
   if(aiKeyRemove) aiKeyRemove.addEventListener('click',()=>{
     const pid = (document.getElementById('ai-settings-provider')||{}).value;
     if(!pid) return;
-    removeApiKey(pid); showToast((AI_PROVIDERS[pid]||{}).label+' key removed'); render();
+    removeApiKey(pid).then(()=>{ showToast((AI_PROVIDERS[pid]||{}).label+' key removed'); render(); });
   });
   // Test key
   const aiKeyTest = document.getElementById('ai-key-test');
