@@ -1758,105 +1758,350 @@ function openHomeworkModal(id){
         DATA.homework = DATA.homework.filter(x=>x.id!==h.id);
         save(STORE_KEYS.homework).then(()=>{ closeModal(); render(); showToast("Deleted"); });
       }
-    }}, {label:'Solve with AI', onClick:()=>{ closeModal(); go('ai-helper'); STATE.hwLinkId = h.id; render(); }}] : []);
+    }}, {label:'Solve with AI', onClick:()=>{ closeModal(); aiState.aiTab='solve'; aiState.lastQuestion=h.description||h.subject||''; STATE.hwLinkId = h.id; go('ai-helper'); }}] : []);
 }
 
 /* =========================================================
-   AI HOMEWORK HELPER
+   AI HOMEWORK HELPER — MULTI-PROVIDER
 ========================================================= */
-let aiState = { imageBase64:null, imageMime:null, lastAnswer:null, lastQuestion:null, loading:false, errorNote:null };
-function getApiKey(){ try{ return localStorage.getItem(LOCAL_PREFIX+'apiKey') || ''; }catch(e){ return ''; } }
-function setApiKey(key){ try{ localStorage.setItem(LOCAL_PREFIX+'apiKey', key); }catch(e){} }
+let aiState = { imageBase64:null, imageMime:null, lastAnswer:null, lastQuestion:null, lastProviderLabel:null, lastModel:null, loading:false, selectedProvider:'auto', aiTab:'solve', settingsProv:null };
+
+/* ---- Provider registry ---- */
+const AI_PROVIDERS = {
+  openai:      { label:'OpenAI',                  lsKey:'tuitionManager_ai_openai',      vision:true,  defaultModel:'gpt-4o' },
+  google:      { label:'Google Gemini',            lsKey:'tuitionManager_ai_google',      vision:true,  defaultModel:'gemini-2.0-flash' },
+  anthropic:   { label:'Anthropic Claude',         lsKey:'tuitionManager_ai_anthropic',   vision:true,  defaultModel:'claude-opus-4-5' },
+  xai:         { label:'xAI Grok',                 lsKey:'tuitionManager_ai_xai',         vision:true,  defaultModel:'grok-2-vision-1212' },
+  deepseek:    { label:'DeepSeek',                 lsKey:'tuitionManager_ai_deepseek',    vision:false, defaultModel:'deepseek-chat' },
+  dashscope:   { label:'Alibaba DashScope',        lsKey:'tuitionManager_ai_dashscope',   vision:true,  defaultModel:'qwen-vl-max' },
+  dashscope_cn:{ label:'Alibaba DashScope China',  lsKey:'tuitionManager_ai_dashscope_cn',vision:true,  defaultModel:'qwen-vl-max' },
+  zhipu:       { label:'Zhipu AI',                 lsKey:'tuitionManager_ai_zhipu',       vision:true,  defaultModel:'glm-4v' },
+  zhipu_cn:    { label:'Zhipu AI China',           lsKey:'tuitionManager_ai_zhipu_cn',    vision:true,  defaultModel:'glm-4v' },
+  minimax:     { label:'MiniMax',                  lsKey:'tuitionManager_ai_minimax',     vision:true,  defaultModel:'MiniMax-VL-01' },
+  minimax_cn:  { label:'MiniMax China',            lsKey:'tuitionManager_ai_minimax_cn',  vision:true,  defaultModel:'MiniMax-VL-01' },
+  openrouter:  { label:'OpenRouter',               lsKey:'tuitionManager_ai_openrouter',  vision:false, defaultModel:'meta-llama/llama-3.3-70b-instruct:free' },
+  mistral:     { label:'Mistral',                  lsKey:'tuitionManager_ai_mistral',     vision:false, defaultModel:'mistral-large-latest' },
+  moonshot:    { label:'Moonshot',                 lsKey:'tuitionManager_ai_moonshot',    vision:false, defaultModel:'moonshot-v1-8k' },
+  groq:        { label:'Groq',                     lsKey:'tuitionManager_ai_groq',        vision:true,  defaultModel:'meta-llama/llama-4-scout-17b-16e-instruct' },
+  nvidia:      { label:'NVIDIA',                   lsKey:'tuitionManager_ai_nvidia',      vision:true,  defaultModel:'nvidia/llama-3.2-11b-vision-instruct' }
+};
+
+function getStoredApiKey(providerId){
+  const p = AI_PROVIDERS[providerId]; if(!p) return '';
+  try{ return localStorage.getItem(p.lsKey) || ''; }catch(e){ return ''; }
+}
+function saveApiKey(providerId, key){
+  const p = AI_PROVIDERS[providerId]; if(!p) return;
+  try{ if(key) localStorage.setItem(p.lsKey, key); else localStorage.removeItem(p.lsKey); }catch(e){}
+}
+function removeApiKey(providerId){ saveApiKey(providerId, ''); }
+function configuredProviders(){ return Object.keys(AI_PROVIDERS).filter(id=>getStoredApiKey(id)); }
+
+/* ---- Fallback priority (user-configurable via UI, stored in localStorage) ---- */
+function getFallbackOrder(){
+  try{ const r = localStorage.getItem(LOCAL_PREFIX+'aiFallbackOrder'); return r? JSON.parse(r) : null; }catch(e){ return null; }
+}
+function saveFallbackOrder(arr){ try{ localStorage.setItem(LOCAL_PREFIX+'aiFallbackOrder', JSON.stringify(arr)); }catch(e){} }
+function getEffectiveFallbackOrder(){
+  const saved = getFallbackOrder();
+  const configured = configuredProviders();
+  if(saved) return saved.filter(id=>configured.includes(id)).concat(configured.filter(id=>!saved.includes(id)));
+  return configured;
+}
+
+/* ---- Error classification ---- */
+function classifyError(status, body){
+  if(status===401||status===403) return 'auth';
+  if(status===429) return 'quota';
+  if(status===402) return 'billing';
+  if(status>=500) return 'unavailable';
+  if(body && /safety|blocked|content.filter/i.test(JSON.stringify(body))) return 'safety';
+  return 'error';
+}
+function humanError(providerId, type, detail){
+  const name = (AI_PROVIDERS[providerId]||{}).label || providerId;
+  if(type==='nokey') return name+' API key is not configured. Go to AI Settings to add it.';
+  if(type==='auth') return name+' returned an authentication error. Check your API key in AI Settings.';
+  if(type==='quota') return name+' quota has been exceeded. Try another configured provider or check your account.';
+  if(type==='billing') return name+' requires billing to be set up. Check your account.';
+  if(type==='unavailable') return name+' is temporarily unavailable. Try again later.';
+  if(type==='safety') return name+' blocked this request due to content safety filters.';
+  if(type==='noimage') return name+' / the selected model does not support image homework. Choose a vision-capable provider.';
+  if(type==='network') return 'Could not reach '+name+'. Check your internet connection.';
+  return name+' error: '+(detail||'Unknown error.');
+}
+
+/* ---- Provider adapters ---- */
+async function callOpenAI(key, model, question, imageBase64, imageMime){
+  const messages = [];
+  const content = [];
+  if(imageBase64) content.push({type:'image_url', image_url:{url:'data:'+imageMime+';base64,'+imageBase64}});
+  content.push({type:'text', text: question || 'Please solve the problem shown in this image, showing full working.'});
+  messages.push({role:'user', content});
+  const res = await fetch('https://api.openai.com/v1/chat/completions',{
+    method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
+    body:JSON.stringify({model, max_tokens:1500, messages})
+  });
+  const data = await res.json();
+  if(!res.ok) return {success:false, error:humanError('openai',classifyError(res.status,data),data.error&&data.error.message), errorType:classifyError(res.status,data)};
+  return {success:true, text:(data.choices[0].message.content||'').trim(), provider:'openai', model};
+}
+
+async function callGoogle(key, model, question, imageBase64, imageMime){
+  const parts = [];
+  if(imageBase64) parts.push({inline_data:{mime_type:imageMime, data:imageBase64}});
+  parts.push({text: question || 'Please solve the problem shown in this image, showing full working.'});
+  const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent?key='+key,{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({contents:[{parts}]})
+  });
+  const data = await res.json();
+  if(!res.ok) return {success:false, error:humanError('google',classifyError(res.status,data),(data.error&&data.error.message)||''), errorType:classifyError(res.status,data)};
+  const text = ((data.candidates||[])[0]||{}).content&&data.candidates[0].content.parts.map(p=>p.text||'').join('');
+  return {success:true, text:(text||'').trim(), provider:'google', model};
+}
+
+async function callAnthropic(key, model, question, imageBase64, imageMime){
+  const content = [];
+  if(imageBase64) content.push({type:'image', source:{type:'base64', media_type:imageMime, data:imageBase64}});
+  content.push({type:'text', text: question || 'Please solve the problem shown in this image, showing full working.'});
+  const res = await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model, max_tokens:1500, messages:[{role:'user', content}]})
+  });
+  const data = await res.json();
+  if(!res.ok) return {success:false, error:humanError('anthropic',classifyError(res.status,data),(data.error&&data.error.message)||''), errorType:classifyError(res.status,data)};
+  return {success:true, text:(data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n\n').trim(), provider:'anthropic', model};
+}
+
+async function callOpenAICompat(providerId, baseUrl, key, model, question, imageBase64, imageMime){
+  const p = AI_PROVIDERS[providerId];
+  if(imageBase64 && !p.vision) return {success:false, error:humanError(providerId,'noimage'), errorType:'noimage'};
+  const content = [];
+  if(imageBase64) content.push({type:'image_url', image_url:{url:'data:'+imageMime+';base64,'+imageBase64}});
+  content.push({type:'text', text: question || 'Please solve the problem shown in this image, showing full working.'});
+  const headers = {'Content-Type':'application/json','Authorization':'Bearer '+key};
+  if(providerId==='openrouter') headers['HTTP-Referer'] = location.href;
+  const res = await fetch(baseUrl+'/chat/completions',{
+    method:'POST', headers,
+    body:JSON.stringify({model, max_tokens:1500, messages:[{role:'user', content}]})
+  });
+  const data = await res.json();
+  if(!res.ok) return {success:false, error:humanError(providerId,classifyError(res.status,data),(data.error&&data.error.message)||''), errorType:classifyError(res.status,data)};
+  return {success:true, text:((data.choices[0].message.content)||'').trim(), provider:providerId, model};
+}
+
+async function callMiniMax(providerId, baseUrl, key, model, question, imageBase64, imageMime){
+  const content = [];
+  if(imageBase64) content.push({type:'image_url', image_url:{url:'data:'+imageMime+';base64,'+imageBase64}});
+  content.push({type:'text', text: question || 'Please solve the problem shown in this image, showing full working.'});
+  const res = await fetch(baseUrl+'/text/chatcompletion_v2',{
+    method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
+    body:JSON.stringify({model, messages:[{role:'user', content}]})
+  });
+  const data = await res.json();
+  if(!res.ok) return {success:false, error:humanError(providerId,classifyError(res.status,data),(data.base_resp&&data.base_resp.status_msg)||''), errorType:classifyError(res.status,data)};
+  return {success:true, text:((((data.choices||[])[0]||{}).message||{}).content||'').trim(), provider:providerId, model};
+}
+
+async function callZhipu(providerId, baseUrl, key, model, question, imageBase64, imageMime){
+  const content = [];
+  if(imageBase64) content.push({type:'image_url', image_url:{url:'data:'+imageMime+';base64,'+imageBase64}});
+  content.push({type:'text', text: question || 'Please solve the problem shown in this image, showing full working.'});
+  const res = await fetch(baseUrl+'/chat/completions',{
+    method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
+    body:JSON.stringify({model, messages:[{role:'user', content}]})
+  });
+  const data = await res.json();
+  if(!res.ok) return {success:false, error:humanError(providerId,classifyError(res.status,data),(data.error&&data.error.message)||''), errorType:classifyError(res.status,data)};
+  return {success:true, text:((((data.choices||[])[0]||{}).message||{}).content||'').trim(), provider:providerId, model};
+}
+
+async function solveWithProvider(providerId, question, imageBase64, imageMime){
+  const p = AI_PROVIDERS[providerId];
+  if(!p) return {success:false, error:'Unknown provider: '+providerId, errorType:'error'};
+  const key = getStoredApiKey(providerId);
+  if(!key) return {success:false, error:humanError(providerId,'nokey'), errorType:'nokey'};
+  if(imageBase64 && !p.vision) return {success:false, error:humanError(providerId,'noimage'), errorType:'noimage'};
+  const model = p.defaultModel;
+  const prompt = (question||'Please solve the problem shown in this image, showing full working.')+
+    '\n\nExplain the solution step by step, clearly, in a way a school student could follow.';
+  try{
+    if(providerId==='openai')   return await callOpenAI(key, model, prompt, imageBase64, imageMime);
+    if(providerId==='google')   return await callGoogle(key, model, prompt, imageBase64, imageMime);
+    if(providerId==='anthropic')return await callAnthropic(key, model, prompt, imageBase64, imageMime);
+    if(providerId==='xai')      return await callOpenAICompat('xai','https://api.x.ai/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='deepseek') return await callOpenAICompat('deepseek','https://api.deepseek.com/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='dashscope')return await callOpenAICompat('dashscope','https://dashscope.aliyuncs.com/compatible-mode/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='dashscope_cn')return await callOpenAICompat('dashscope_cn','https://dashscope.aliyuncs.com/compatible-mode/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='zhipu')    return await callZhipu('zhipu','https://open.bigmodel.cn/api/paas/v4',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='zhipu_cn') return await callZhipu('zhipu_cn','https://open.bigmodel.cn/api/paas/v4',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='minimax')  return await callMiniMax('minimax','https://api.minimax.chat/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='minimax_cn')return await callMiniMax('minimax_cn','https://api.minimax.chat/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='openrouter')return await callOpenAICompat('openrouter','https://openrouter.ai/api/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='mistral')  return await callOpenAICompat('mistral','https://api.mistral.ai/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='moonshot') return await callOpenAICompat('moonshot','https://api.moonshot.cn/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='groq')     return await callOpenAICompat('groq','https://api.groq.com/openai/v1',key,model,prompt,imageBase64,imageMime);
+    if(providerId==='nvidia')   return await callOpenAICompat('nvidia','https://integrate.api.nvidia.com/v1',key,model,prompt,imageBase64,imageMime);
+    return {success:false, error:'Provider not implemented: '+providerId, errorType:'error'};
+  }catch(e){
+    return {success:false, error:humanError(providerId,'network',e.message), errorType:'network'};
+  }
+}
+
+async function testProvider(providerId){
+  const p = AI_PROVIDERS[providerId];
+  const key = getStoredApiKey(providerId);
+  if(!key) return {ok:false, msg:humanError(providerId,'nokey')};
+  try{
+    let res;
+    if(providerId==='google'){
+      res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?key='+key);
+      return res.ok ? {ok:true, msg:'API key works.'} : {ok:false, msg:humanError(providerId,classifyError(res.status,null))};
+    }
+    const prompt = 'Reply with only the word OK.';
+    const result = await solveWithProvider(providerId, prompt, null, null);
+    return result.success ? {ok:true, msg:'API key works.'} : {ok:false, msg:result.error};
+  }catch(e){
+    return {ok:false, msg:humanError(providerId,'network',e.message)};
+  }
+}
 
 function viewAIHelper(){
-  const key = getApiKey();
+  const tab = aiState.aiTab || 'solve';
+  const selProv = aiState.selectedProvider || 'auto';
+  const settingsProv = aiState.settingsProv || Object.keys(AI_PROVIDERS)[0];
+  const configured = configuredProviders();
+
+  /* ---- Settings tab ---- */
+  let settingsHTML = '';
+  if(tab==='settings'){
+    const sp = AI_PROVIDERS[settingsProv];
+    const spKey = getStoredApiKey(settingsProv);
+    const statusRows = Object.keys(AI_PROVIDERS).map(id=>{
+      const has = !!getStoredApiKey(id);
+      return `<div class="flex-between" style="padding:5px 0;border-bottom:1px solid var(--border-soft);font-size:13px">
+        <span>${has?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--text-faint)">○</span>'} ${esc(AI_PROVIDERS[id].label)}</span>
+        <span class="faint" style="font-size:12px">${has?'Configured':'Not configured'}</span>
+      </div>`;
+    }).join('');
+    const fallbackOrder = getEffectiveFallbackOrder();
+    settingsHTML = `
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-title mb8">Configure API Key</div>
+        <div class="muted mb12" style="font-size:12.5px">
+          <b>Security notice:</b> This is a browser-based app. API keys entered here are stored in your browser's Local Storage and sent directly from your browser to the provider's API — they are not sent to any other server. However, keys stored in a browser cannot be considered completely secret. Restrict your keys using the provider's API/referrer restrictions where available, and monitor your usage regularly.
+          <br/><br/>Availability of free usage depends on the provider's current pricing and account terms.
+        </div>
+        <div class="field mb8"><label>Provider</label>
+          <select id="ai-settings-provider">${Object.keys(AI_PROVIDERS).map(id=>`<option value="${id}" ${settingsProv===id?'selected':''}>${esc(AI_PROVIDERS[id].label)}</option>`).join('')}</select>
+        </div>
+        <div class="field mb8"><label>API Key</label>
+          <input type="password" id="ai-settings-key" placeholder="Paste your API key here" value="${esc(spKey)}" />
+        </div>
+        <div class="flex gap8 mb8" style="flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" id="ai-key-save">Save Key</button>
+          ${spKey?`<button class="btn btn-ghost btn-sm" id="ai-key-remove">Remove Key</button>`:''}
+          <button class="btn btn-sm" id="ai-key-test">Test Key</button>
+        </div>
+        <div id="ai-test-result" class="hint"></div>
+        <div class="hint mt4">Default model: <span class="mono">${esc(sp?sp.defaultModel:'')}</span> · Vision: ${sp&&sp.vision?'Yes':'No'}</div>
+      </div>
+      <div class="panel">
+        <div class="panel-title mb8">Configured Providers</div>
+        ${statusRows}
+        ${fallbackOrder.length>1?`<div class="mt12"><div class="stat-label mb4">Auto fallback order</div>${fallbackOrder.map((id,i)=>`<div style="font-size:12.5px;padding:3px 0">${i+1}. ${esc(AI_PROVIDERS[id].label)}</div>`).join('')}</div>`:''}
+      </div>
+    </div>`;
+  }
+
+  /* ---- Solve tab ---- */
+  let solveHTML = '';
+  if(tab==='solve'){
+    const provOptions = `<option value="auto">Auto (try configured providers in order)</option>`+
+      Object.keys(AI_PROVIDERS).map(id=>`<option value="${id}" ${selProv===id?'selected':''}>${esc(AI_PROVIDERS[id].label)}</option>`).join('');
+    solveHTML = `
+    <div class="grid-2">
+      <div class="panel">
+        <div class="field mb8"><label>AI Provider</label>
+          <select id="ai-provider-select">${provOptions}</select>
+        </div>
+        ${configured.length===0?`<div class="alert-error" style="margin-bottom:12px"><div class="alert-title">No API keys configured</div>Go to the <b>AI Settings</b> tab to add at least one provider key.</div>`:''}
+        <div class="field mb12"><label>Question</label><textarea id="ai-question" placeholder="Type the question, or describe what's in the photo you're uploading…" style="min-height:100px">${esc(aiState.lastQuestion||'')}</textarea></div>
+        <div class="field mb12">
+          <label>Upload a photo of the problem (optional)</label>
+          <input type="file" id="ai-image-input" accept="image/*" />
+          ${aiState.imageBase64?`<img src="data:${aiState.imageMime};base64,${aiState.imageBase64}" class="img-preview" />`:''}
+        </div>
+        <div class="flex gap8">
+          <button class="btn btn-gold" id="ai-solve-btn" ${aiState.loading?'disabled':''}>${aiState.loading?'Thinking…':'Solve with AI'}</button>
+          ${aiState.imageBase64?`<button class="btn btn-ghost" id="ai-clear-image">Remove photo</button>`:''}
+        </div>
+        <div class="hint mt8">Tip: mention the subject and class level for a more precise answer.</div>
+      </div>
+      <div class="panel">
+        <div class="panel-title mb12">Solution</div>
+        ${aiState.loading?`<div class="empty-state"><div class="ei">…</div>Working through it.</div>`:
+          aiState.lastAnswer?`
+            ${aiState.lastProviderLabel?`<div class="hint mb8">Solved by: <b>${esc(aiState.lastProviderLabel)}</b>${aiState.lastModel?' — <span class="mono">'+esc(aiState.lastModel)+'</span>':''}</div>`:''}
+            <div class="ai-answer">${esc(aiState.lastAnswer)}</div>
+            <div class="flex gap8 mt12"><button class="btn btn-sm" id="ai-save-to-hw">Save to a homework record</button></div>`
+          :`<div class="empty-state"><div class="ei">✺</div>Ask a question to see the step-by-step solution here.</div>`}
+      </div>
+    </div>`;
+  }
+
   return `
   <div class="topbar">
-    <div><div class="page-title">AI Homework Helper</div><div class="page-sub">Ask a question, or upload a photo of a textbook page or homework problem</div></div>
+    <div><div class="page-title">AI Homework Helper</div><div class="page-sub">Supports 16 AI providers — configure keys in AI Settings</div></div>
   </div>
-
-  <div class="panel">
-    <div class="flex-between mb8">
-      <div class="panel-title">Anthropic API key</div>
-      <span class="badge ${key?'badge-green':'badge-red'}">${key? 'Key saved' : 'Not set'}</span>
-    </div>
-    <div class="muted mb12" style="font-size:12.5px">
-      This app runs locally, so the AI Helper needs your own Anthropic API key to work — it's stored only in this browser and sent directly to Anthropic, never anywhere else.
-      Get one at <span class="mono">console.anthropic.com/settings/keys</span>.
-    </div>
-    <div class="flex gap8" style="flex-wrap:wrap">
-      <input type="password" id="ai-api-key" placeholder="sk-ant-…" value="${esc(key)}" style="flex:1;min-width:220px;border:1px solid var(--border);border-radius:5px;padding:8px 10px" />
-      <button class="btn btn-primary btn-sm" id="ai-save-key">Save key</button>
-      ${key? `<button class="btn btn-ghost btn-sm" id="ai-clear-key">Remove key</button>`:''}
-    </div>
+  <div class="tabbar">
+    <button class="tabbtn ${tab==='solve'?'active':''}" data-ai-tab="solve">Solve Homework</button>
+    <button class="tabbtn ${tab==='settings'?'active':''}" data-ai-tab="settings">AI Settings</button>
   </div>
-
-  <div class="grid-2">
-    <div class="panel">
-      <div class="field mb12"><label>Question</label><textarea id="ai-question" placeholder="Type the question, or describe what's in the photo you're uploading…" style="min-height:100px">${esc(aiState.lastQuestion||'')}</textarea></div>
-      <div class="field mb12">
-        <label>Or upload a photo of the problem (optional)</label>
-        <input type="file" id="ai-image-input" accept="image/*" />
-        ${aiState.imageBase64? `<img src="data:${aiState.imageMime};base64,${aiState.imageBase64}" class="img-preview" />` : ''}
-      </div>
-      <div class="flex gap8">
-        <button class="btn btn-gold" id="ai-solve-btn" ${aiState.loading?'disabled':''}>${aiState.loading? 'Thinking…' : 'Get solution'}</button>
-        ${aiState.imageBase64? `<button class="btn btn-ghost" id="ai-clear-image">Remove photo</button>`:''}
-      </div>
-      <div class="hint mt8">Tip: for a book question, mention the subject and class level for a more precise answer.</div>
-    </div>
-    <div class="panel">
-      <div class="panel-title mb12">Solution</div>
-      ${aiState.loading? `<div class="empty-state"><div class="ei">…</div>Working through it.</div>` :
-        aiState.lastAnswer? `<div class="ai-answer">${esc(aiState.lastAnswer)}</div>
-          <div class="flex gap8 mt12"><button class="btn btn-sm" id="ai-save-to-hw">Save to a homework record</button></div>`
-        : `<div class="empty-state"><div class="ei">✺</div>Ask a question to see the step-by-step solution here.</div>`}
-    </div>
-  </div>`;
+  ${solveHTML}${settingsHTML}`;
 }
 async function handleAISolve(){
-  const key = getApiKey();
-  if(!key){ showToast("Add your Anthropic API key above first."); return; }
   const q = document.getElementById('ai-question').value.trim();
-  if(!q && !aiState.imageBase64){ showToast("Type a question or upload a photo first."); return; }
+  if(!q && !aiState.imageBase64){ showToast('Type a question or upload a photo first.'); return; }
+  const selProv = (document.getElementById('ai-provider-select')||{}).value || aiState.selectedProvider || 'auto';
+  aiState.selectedProvider = selProv;
   aiState.lastQuestion = q;
-  aiState.loading = true; aiState.lastAnswer=null; render();
-  try{
-    const contentArr = [];
-    if(aiState.imageBase64){
-      contentArr.push({ type:"image", source:{ type:"base64", media_type: aiState.imageMime, data: aiState.imageBase64 } });
+  aiState.loading = true; aiState.lastAnswer = null; aiState.lastProviderLabel = null; aiState.lastModel = null;
+  render();
+
+  let result;
+  if(selProv === 'auto'){
+    const order = getEffectiveFallbackOrder();
+    if(!order.length){ aiState.lastAnswer = 'No API keys configured. Go to AI Settings to add a provider key.'; aiState.loading=false; render(); return; }
+    for(const pid of order){
+      result = await solveWithProvider(pid, q, aiState.imageBase64, aiState.imageMime);
+      if(result.success) break;
+      if(result.errorType==='auth' || result.errorType==='noimage') break; // don't try next for auth/image errors
+      if(result.errorType==='quota' || result.errorType==='unavailable') continue; // try next
+      break;
     }
-    contentArr.push({ type:"text", text: (q || "Please solve the problem shown in this image, showing full working.") + "\n\nExplain the solution step by step, clearly, in a way a school student could follow." });
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
-      },
-      body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, messages:[{role:"user", content: contentArr}] })
-    });
-    if(!response.ok){
-      let msg = "Request failed (status "+response.status+").";
-      try{ const errData = await response.json(); if(errData && errData.error && errData.error.message) msg = errData.error.message; }catch(e){}
-      if(response.status===401) msg = "That API key was rejected. Double-check it's correct and active.";
-      aiState.lastAnswer = "Couldn't get a solution: " + msg;
-    } else {
-      const data = await response.json();
-      const textBlocks = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text);
-      aiState.lastAnswer = textBlocks.join('\n\n') || "No answer returned — please try rephrasing the question.";
-    }
-  }catch(e){
-    console.error(e);
-    aiState.lastAnswer = "Couldn't reach Anthropic's API — check your internet connection and that the API key is correct.";
+  } else {
+    result = await solveWithProvider(selProv, q, aiState.imageBase64, aiState.imageMime);
+  }
+
+  if(result && result.success){
+    aiState.lastAnswer = result.text || 'No answer returned — please try rephrasing the question.';
+    aiState.lastProviderLabel = (AI_PROVIDERS[result.provider]||{}).label || result.provider;
+    aiState.lastModel = result.model || null;
+  } else {
+    aiState.lastAnswer = (result && result.error) || 'Something went wrong. Please try again.';
+    aiState.lastProviderLabel = null;
   }
   aiState.loading = false;
   render();
 }
 function handleSaveToHomework(){
   if(!aiState.lastAnswer) return;
-  const options = DATA.homework.map(h=>`<option value="${h.id}">${esc((findStudent(h.studentId)||{}).name||'?')} — ${esc(h.subject)} (${fmtDate(h.assignedDate)})</option>`).join('');
+  const linked = STATE.hwLinkId;
+  const options = DATA.homework.map(h=>`<option value="${h.id}" ${linked===h.id?'selected':''}>${esc((findStudent(h.studentId)||{}).name||'?')} — ${esc(h.subject)} (${fmtDate(h.assignedDate)})</option>`).join('');
   openModal("Save solution to homework", `
     <div class="field"><label>Choose a homework record</label><select name="hwId">${options||'<option value="">No homework records yet</option>'}</select></div>
     <div class="hint mt4">The AI's solution will be added to that homework's remarks.</div>
@@ -1865,6 +2110,7 @@ function handleSaveToHomework(){
     if(!hw) return "Select a homework record.";
     hw.remarks = (hw.remarks? hw.remarks+"\n\n":"") + "AI solution:\n" + aiState.lastAnswer;
     hw.status = hw.status==='Pending'? 'Submitted': hw.status;
+    STATE.hwLinkId = null;
     save(STORE_KEYS.homework).then(()=>{ closeModal(); showToast("Saved to homework record"); });
   });
 }
@@ -2541,18 +2787,46 @@ function bindGlobalEvents(){
     });
   });
 
-  const aiSaveKeyBtn = document.getElementById('ai-save-key');
-  if(aiSaveKeyBtn) aiSaveKeyBtn.addEventListener('click',()=>{
-    const val = document.getElementById('ai-api-key').value.trim();
-    if(!val){ showToast("Paste a key first."); return; }
-    setApiKey(val); showToast("API key saved"); render();
+  // AI tab switching
+  document.querySelectorAll('[data-ai-tab]').forEach(el=>{
+    el.addEventListener('click',()=>{ aiState.aiTab = el.getAttribute('data-ai-tab'); render(); });
   });
-  const aiClearKeyBtn = document.getElementById('ai-clear-key');
-  if(aiClearKeyBtn) aiClearKeyBtn.addEventListener('click',()=>{
-    setApiKey(''); showToast("API key removed"); render();
+  // AI settings: provider dropdown changes
+  const aiSettingsProv = document.getElementById('ai-settings-provider');
+  if(aiSettingsProv) aiSettingsProv.addEventListener('change',()=>{ aiState.settingsProv = aiSettingsProv.value; render(); });
+  // Save key
+  const aiKeySave = document.getElementById('ai-key-save');
+  if(aiKeySave) aiKeySave.addEventListener('click',()=>{
+    const pid = (document.getElementById('ai-settings-provider')||{}).value;
+    const val = (document.getElementById('ai-settings-key')||{}).value.trim();
+    if(!pid||!val){ showToast('Select a provider and paste a key first.'); return; }
+    saveApiKey(pid, val); showToast((AI_PROVIDERS[pid]||{}).label+' key saved'); render();
   });
+  // Remove key
+  const aiKeyRemove = document.getElementById('ai-key-remove');
+  if(aiKeyRemove) aiKeyRemove.addEventListener('click',()=>{
+    const pid = (document.getElementById('ai-settings-provider')||{}).value;
+    if(!pid) return;
+    removeApiKey(pid); showToast((AI_PROVIDERS[pid]||{}).label+' key removed'); render();
+  });
+  // Test key
+  const aiKeyTest = document.getElementById('ai-key-test');
+  if(aiKeyTest) aiKeyTest.addEventListener('click', async ()=>{
+    const pid = (document.getElementById('ai-settings-provider')||{}).value;
+    const resultEl = document.getElementById('ai-test-result');
+    if(!pid||!resultEl) return;
+    resultEl.textContent = 'Testing…'; resultEl.style.color='';
+    const r = await testProvider(pid);
+    resultEl.textContent = (r.ok?'✓ ':'✗ ')+r.msg;
+    resultEl.style.color = r.ok?'var(--green)':'var(--red)';
+  });
+  // Provider select on solve tab
+  const aiProvSel = document.getElementById('ai-provider-select');
+  if(aiProvSel) aiProvSel.addEventListener('change',()=>{ aiState.selectedProvider = aiProvSel.value; });
+  // Solve button
   const aiSolveBtn = document.getElementById('ai-solve-btn');
   if(aiSolveBtn) aiSolveBtn.addEventListener('click', handleAISolve);
+  // Image upload
   const aiImgInput = document.getElementById('ai-image-input');
   if(aiImgInput) aiImgInput.addEventListener('change',(e)=>{
     const file = e.target.files[0]; if(!file) return;
