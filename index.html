@@ -177,6 +177,7 @@
     border-radius:var(--radius);
     padding:18px 20px;
     margin-bottom:20px;
+    overflow-x:auto;
   }
   .panel-head{
     display:flex; align-items:center; justify-content:space-between;
@@ -290,7 +291,7 @@
   .modal-overlay{
     position:fixed; inset:0; background:rgba(19,32,61,0.45);
     display:flex; align-items:flex-start; justify-content:center;
-    padding:40px 16px; overflow-y:auto; z-index:100;
+    padding:40px 16px; overflow-y:auto; z-index:130;
   }
   .modal{
     background:#fff; border-radius:8px; width:100%; max-width:560px;
@@ -348,11 +349,186 @@
   .divider{ height:1px; background:var(--border-soft); margin:14px 0; }
   .grid-2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   .grid-3{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
-  @media (max-width:900px){
+  /* =====================================================
+     RESPONSIVE SYSTEM
+     Breakpoints:
+       Large desktop : >= 1200px  (default styles)
+       Tablet        : 768–1199px
+       Mobile        : 480–767px
+       Small mobile  : < 480px
+  ===================================================== */
+
+  /* --- Hamburger button (mobile only) --- */
+  .hamburger{
+    display:none;
+    background:none;
+    border:none;
+    color:#fff;
+    font-size:22px;
+    padding:6px 10px;
+    cursor:pointer;
+    line-height:1;
+    flex-shrink:0;
+  }
+  /* --- Mobile top bar --- */
+  .mobile-topbar{
+    display:none;
+    position:fixed;
+    top:0; left:0; right:0;
+    height:52px;
+    background:var(--navy);
+    color:#fff;
+    align-items:center;
+    justify-content:space-between;
+    padding:0 14px;
+    z-index:120;
+    gap:10px;
+  }
+  .mobile-topbar .mtb-brand{ font-size:15px; font-weight:600; font-family:'IBM Plex Mono',monospace; color:#fff; flex:1; }
+  /* --- Backdrop --- */
+  .sidebar-backdrop{
+    display:none;
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,0.45);
+    z-index:118;
+  }
+  .sidebar-backdrop.open{ display:block; }
+  /* --- Table responsive wrapper --- */
+  .table-responsive{
+    width:100%;
+    overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+  }
+  /* --- Utility --- */
+  .mobile-only{ display:none; }
+  .desktop-only{ display:block; }
+
+  /* =====================================================
+     TABLET  768–1199px
+  ===================================================== */
+  @media (max-width:1199px){
+    .sidebar{ width:200px; }
+    .main{ margin-left:200px; padding:20px 22px 50px 22px; }
+    .grid-3{ grid-template-columns:1fr 1fr; }
+    .stat-row{ grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); }
+  }
+
+  /* =====================================================
+     MOBILE  <= 767px
+  ===================================================== */
+  @media (max-width:767px){
+    /* Show mobile topbar, hide desktop sidebar by default */
+    .mobile-topbar{ display:flex; }
+    .hamburger{ display:flex; align-items:center; }
+    .mobile-only{ display:block; }
+    .desktop-only{ display:none; }
+
+    /* Sidebar becomes a slide-in drawer */
+    .sidebar{
+      width:260px;
+      transform:translateX(-100%);
+      transition:transform .25s ease;
+      z-index:119;
+      top:0;
+    }
+    .sidebar.open{ transform:translateX(0); }
+
+    /* Main content fills full width, pushed below mobile topbar */
+    .main{
+      margin-left:0;
+      padding:70px 14px 60px 14px;
+    }
+
+    /* Topbar stacks on mobile */
+    .topbar{
+      flex-direction:column;
+      align-items:flex-start;
+      gap:10px;
+      margin-bottom:16px;
+    }
+    .topbar .search-box{ width:100%; }
+    .page-title{ font-size:clamp(16px,4vw,21px); }
+
+    /* Grids collapse to 1 column */
     .grid-2, .grid-3{ grid-template-columns:1fr; }
     .form-grid{ grid-template-columns:1fr; }
+    .form-grid .field.span2{ grid-column:1; }
+    .stat-row{ grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; }
+    .quick-grid{ grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:10px; }
+
+    /* Panels */
+    .panel{ padding:14px 12px; }
+    .panel-head{ flex-direction:column; align-items:flex-start; }
+
+    /* Tables scroll horizontally */
+    table{ min-width:520px; }
+    .table-responsive{ border-radius:var(--radius); }
+
+    /* Modals */
+    .modal-overlay{ padding:12px 8px; align-items:flex-end; }
+    .modal{ max-width:100%; width:calc(100% - 0px); max-height:calc(100vh - 60px); overflow-y:auto; border-radius:10px 10px 0 0; margin-bottom:0; }
+    .modal.wide{ max-width:100%; }
+
+    /* Share rows */
+    .share-row{ grid-template-columns:1fr 1fr; gap:6px; }
+    .share-row input, .share-row select{ font-size:13px; }
+
+    /* Timetable grid — allow horizontal scroll */
+    .tt-grid{ min-width:560px; }
+
+    /* Buttons */
+    .form-actions{ flex-wrap:wrap; gap:8px; }
+    .btn{ min-height:44px; }
+    .hamburger{ min-width:44px; min-height:44px; justify-content:center; padding:0; }
+    .nav-item{ min-height:44px; }
+    .tabbtn{ min-height:44px; }
+    .month-switch button{ width:44px; height:44px; }
+    .modal-close{ min-width:44px; min-height:44px; }
+    .field input, .field select, select.filter, input.filter{ min-height:44px; }
+    .chk-row{ min-height:44px; }
+
+    /* Month switch */
+    .month-switch .month-label{ min-width:110px; font-size:13px; }
+
+    /* AI helper */
+    .ai-answer{ font-size:13px; }
+    .img-preview{ max-height:160px; }
+
+    /* Stat cards */
+    .stat-value{ font-size:18px; }
+
+    /* Tab bar wraps */
+    .tabbar{ gap:2px; }
+    .tabbtn{ padding:7px 10px; font-size:12px; }
+
+    /* Topbar flex-between stacks */
+    .flex-between{ flex-wrap:wrap; gap:8px; }
+
+    /* Profile head */
+    .profile-head{ flex-wrap:wrap; }
   }
-  .ai-answer{ background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:14px 16px; font-size:13.5px; white-space:pre-wrap; line-height:1.6; }
+
+  /* =====================================================
+     SMALL MOBILE  < 480px
+  ===================================================== */
+  @media (max-width:479px){
+    .main{ padding:64px 10px 50px 10px; }
+    .stat-row{ grid-template-columns:1fr 1fr; }
+    .quick-grid{ grid-template-columns:1fr 1fr; }
+    .page-title{ font-size:16px; }
+    .stat-value{ font-size:16px; }
+    .panel{ padding:12px 10px; }
+    .modal-overlay{ padding:8px 4px; }
+    .modal{ max-height:calc(100vh - 40px); }
+    .tabbtn{ padding:6px 8px; font-size:11.5px; }
+    table{ min-width:460px; }
+    .share-row{ grid-template-columns:1fr; }
+    .month-switch .month-label{ min-width:90px; font-size:12px; }
+    .btn{ font-size:12px; padding:6px 10px; }
+    .btn-sm{ padding:4px 8px; font-size:11.5px; }
+  }
+  .ai-answer{ background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:14px 16px; font-size:13.5px; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.6; }
   .img-preview{ max-width:100%; max-height:220px; border-radius:6px; border:1px solid var(--border); margin-top:8px; }
   .progress-track{ background:var(--border-soft); border-radius:20px; height:7px; width:100%; overflow:hidden; }
   .progress-fill{ height:100%; background:var(--gold); }
@@ -719,8 +895,14 @@ function layoutShell(){
       ${navItem('backup','⇅','Backup & Restore')}
     </div>
   </div>
+  </div>
   <div class="main">
     <div id="content"></div>
+  </div>
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+  <div class="mobile-topbar">
+    <button class="hamburger" id="hamburger-btn" aria-label="Open navigation menu">&#9776;</button>
+    <span class="mtb-brand">LEDGER</span>
   </div>
   <div id="modal-root"></div>
   `;
@@ -2731,6 +2913,17 @@ function enhanceTables(){
 }
 
 function bindGlobalEvents(){
+  // Mobile sidebar toggle
+  const hamburgerBtn = document.getElementById('hamburger-btn');
+  const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+  const sidebarEl = document.querySelector('.sidebar');
+  function openSidebar(){ if(sidebarEl) sidebarEl.classList.add('open'); if(sidebarBackdrop) sidebarBackdrop.classList.add('open'); }
+  function closeSidebar(){ if(sidebarEl) sidebarEl.classList.remove('open'); if(sidebarBackdrop) sidebarBackdrop.classList.remove('open'); }
+  if(hamburgerBtn) hamburgerBtn.addEventListener('click', openSidebar);
+  if(sidebarBackdrop) sidebarBackdrop.addEventListener('click', closeSidebar);
+  // Close sidebar on nav item click (mobile)
+  document.querySelectorAll('.nav-item').forEach(el=>el.addEventListener('click', closeSidebar));
+
   document.querySelectorAll('[data-nav]').forEach(el=>{
     el.addEventListener('click',(e)=>{
       e.stopPropagation();
