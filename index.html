@@ -45,7 +45,7 @@
   input, select, textarea{ font-family:inherit; font-size:14px; }
 
   /* ---------- Layout ---------- */
-  #app{ display:flex; min-height:100vh; }
+  #app{ display:block; min-height:100vh; width:100%; }
 
   .sidebar{
     width:230px;
@@ -577,16 +577,21 @@ const CLASS_OPTIONS = ["Play Group","Nursery","K.G 1 (KG-1)","K.G 2 (KG-2)","Pre
 const WEEKDAYS = ["Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
+/* aiKeys is intentionally excluded — AI keys are local-only and never sent to Supabase */
 const STORE_KEYS = {
   teachers:"teachers", students:"students", templates:"timetableTemplates",
   studentTT:"studentTimetables", homework:"homework", payments:"payments",
-  attendance:"attendance", tests:"testResults", aiKeys:"aiKeys"
+  attendance:"attendance", tests:"testResults"
 };
+const AI_KEY_LS_PREFIX = "tuitionLedger_ai_";
 
 /* =========================================================
    STATE
 ========================================================= */
-let DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], aiKeys:{} };
+/* aiKeys removed from DATA — stored only in localStorage under user-scoped keys */
+let DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[] };
+let currentUser = null; /* Supabase Auth user object */
+let authReady = false;  /* true once onAuthStateChange has fired at least once */
 let STATE = { view:"dashboard", selectedId:null, detailTab:null, search:"", paymentsMonth:new Date(), attMonth:new Date(), hwFilter:{}, reportTab:"earnings", reportMonth:new Date() };
 
 /* =========================================================
@@ -595,33 +600,26 @@ let STATE = { view:"dashboard", selectedId:null, detailTab:null, search:"", paym
    Secondary: Claude's window.storage, used only if this page happens to be
    rendered inside a Claude.ai artifact panel — never required.
 ========================================================= */
+/* LOCAL_PREFIX is now user-scoped at runtime — see localKey() below */
 const LOCAL_PREFIX = "tuitionLedger_";
-// Set these once before publishing to share the same Supabase project across devices.
-// Use only the anon/public key here; never put a service_role or secret key in this file.
+/* Set these once before publishing. Use only the anon/public key — never service_role or sb_secret_. */
 const SHARED_SUPABASE_CONFIG = {
   url: "https://jlbjszgcivpexonaaoqb.supabase.co",
   anonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpsYmpzemdjaXZwZXhvbmFhb3FiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTExODAzNTksImV4cCI6MjEwNjc1NjM1OX0.uIIhyqo9Tj_gXXGXulJ6aUCiNUlwFc7fwATyCtipROM"
 };
+/* Returns a localStorage key scoped to the current authenticated user.
+   Falls back to a shared prefix only for non-private data (e.g. Supabase config). */
+function localKey(k){ return LOCAL_PREFIX + (currentUser ? currentUser.id+'_' : '') + k; }
 const hasClaudeStorage = (function(){
   try{ return typeof window.storage !== 'undefined' && window.storage && typeof window.storage.get === 'function'; }
   catch(e){ return false; }
 })();
 
 /* ---------------------------------------------------------------
-   CLOUD SYNC (Supabase) — optional.
-   When configured, every record is read from and written to a shared
-   Supabase table, so everyone who opens this page with the same
-   project URL + key sees the same live data. Without it, the app
-   falls back to this browser's own local storage, same as before.
-   Table needed (run once in Supabase's SQL editor):
-     create table tuition_ledger (
-       key text primary key,
-       json text,
-       updated_at timestamptz default now()
-     );
-     alter table tuition_ledger enable row level security;
-     create policy "anon read/write" on tuition_ledger
-       for all using (true) with check (true);
+   CLOUD SYNC (Supabase) — requires Auth.
+   Every row is owned by the authenticated user via user_id.
+   RLS on tuition_ledger enforces that users can only access their own rows.
+   See supabase/migrations/001_secure_tuition_ledger.sql for the required schema.
    --------------------------------------------------------------- */
 let sbClient = null, sbReady = false, sbLoading = false, sbChannel = null;
 const lastWrittenJson = {};
@@ -656,25 +654,58 @@ async function initSupabase(){
   try{
     await loadScriptOnce('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2');
     if(!window.supabase || typeof window.supabase.createClient!=='function'){ throw new Error("Supabase script didn't load"); }
-    sbClient = window.supabase.createClient(cfg.url, cfg.anonKey);
+    sbClient = window.supabase.createClient(cfg.url, cfg.anonKey, {
+      auth: {
+        storage: window.localStorage,
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: false
+      }
+    });
     sbReady = true;
   }catch(e){
-    console.error("Supabase init failed", e);
     sbReady = false; sbClient = null;
   }
   sbLoading = false;
   return sbReady;
 }
+
+/* ---- Auth ---- (handled inline in init()) ---- */
+async function signIn(email, password){
+  const { error } = await sbClient.auth.signInWithPassword({ email, password });
+  if(error) throw error;
+}
+async function signUp(email, password){
+  const { error } = await sbClient.auth.signUp({ email, password });
+  if(error) throw error;
+}
+async function signOut(){
+  unsubscribeSupabase();
+  resetDataInMemory();
+  await sbClient.auth.signOut();
+  render();
+}
+function resetDataInMemory(){
+  DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[] };
+}
+
+/* ---- Realtime — user-scoped ---- */
 function subscribeSupabase(){
-  if(!sbClient || sbChannel) return;
-  sbChannel = sbClient.channel('tuition_ledger_changes')
-    .on('postgres_changes', {event:'*', schema:'public', table:'tuition_ledger'}, (payload)=>{
+  if(!sbClient || sbChannel || !currentUser) return;
+  const uid = currentUser.id;
+  sbChannel = sbClient.channel('tuition_ledger_user_'+uid)
+    .on('postgres_changes', {
+      event:'*', schema:'public', table:'tuition_ledger',
+      filter:'user_id=eq.'+uid
+    }, (payload)=>{
       const row = payload.new;
-      if(!row || !row.key) return;
+      /* Double-check ownership even if filter is applied */
+      if(!row || !row.key || row.user_id !== uid) return;
       const k = row.key, json = row.json;
       if(json===undefined || json===lastWrittenJson[k]) return;
+      if(!(k in DATA)) return; /* ignore unknown keys e.g. aiKeys */
       try{ DATA[k] = JSON.parse(json); }catch(e){ return; }
-      try{ localStorage.setItem(LOCAL_PREFIX+k, json); }catch(e){}
+      try{ localStorage.setItem(localKey(k), json); }catch(e){}
       if(document.getElementById('app')){ render(); showToast("Updated — synced from another device"); }
     })
     .subscribe();
@@ -684,54 +715,64 @@ function unsubscribeSupabase(){
   sbChannel = null;
 }
 
+/* ---- Data load — user-scoped ---- */
 async function loadAll(){
+  if(!currentUser) return;
+  const uid = currentUser.id;
   const keys = Object.values(STORE_KEYS);
-  const sbOk = await initSupabase();
+  const sbOk = sbReady && !!sbClient;
   await Promise.all(keys.map(async k=>{
     let raw = null;
     if(sbOk){
       try{
-        const { data, error } = await sbClient.from('tuition_ledger').select('json').eq('key',k).maybeSingle();
+        /* Explicit user_id filter in addition to RLS */
+        const { data, error } = await sbClient.from('tuition_ledger')
+          .select('json').eq('key',k).eq('user_id',uid).maybeSingle();
         if(!error && data && data.json!==undefined) raw = data.json;
-      }catch(e){ console.error("Supabase read failed for "+k, e); }
+      }catch(e){ /* fall through to local */ }
     }
     if(raw===null){
-      try{ raw = localStorage.getItem(LOCAL_PREFIX+k); }catch(e){ raw = null; }
+      try{ raw = localStorage.getItem(localKey(k)); }catch(e){ raw = null; }
     }
     if(raw===null && hasClaudeStorage){
       try{
-        const r = await window.storage.get(k,false);
+        const r = await window.storage.get(localKey(k),false);
         if(r && r.value!==undefined) raw = r.value;
-      }catch(e){ /* key not found yet, keep default */ }
+      }catch(e){}
     }
     if(raw){
-      try{ DATA[k] = JSON.parse(raw); }catch(e){ console.error("Couldn't parse stored data for "+k, e); }
+      try{ DATA[k] = JSON.parse(raw); }catch(e){}
     }
   }));
-  if(sbOk){ Object.values(STORE_KEYS).forEach(k=>{ lastWrittenJson[k] = JSON.stringify(DATA[k]); }); subscribeSupabase(); }
+  if(sbOk){ Object.values(STORE_KEYS).forEach(k=>{ lastWrittenJson[k] = JSON.stringify(DATA[k]); }); }
 }
+
+/* ---- Save — always includes user_id ---- */
 async function save(key){
+  if(!currentUser){
+    showToast("⚠️ Not signed in — data saved in this browser only.");
+    try{ localStorage.setItem(localKey(key), JSON.stringify(DATA[key])); }catch(e){}
+    return;
+  }
   const json = JSON.stringify(DATA[key]);
   lastWrittenJson[key] = json;
   let localOk = true;
-  try{
-    localStorage.setItem(LOCAL_PREFIX+key, json);
-  }catch(e){
-    localOk = false;
-    console.error("Local save failed for "+key, e);
-  }
+  try{ localStorage.setItem(localKey(key), json); }catch(e){ localOk = false; }
   if(sbReady && sbClient){
     try{
-      const { error } = await sbClient.from('tuition_ledger').upsert({ key, json, updated_at: new Date().toISOString() });
+      const { error } = await sbClient.from('tuition_ledger').upsert({
+        user_id: currentUser.id, key, json,
+        updated_at: new Date().toISOString()
+      });
       if(error) throw error;
+      /* silent success — no toast spam on every save */
     }catch(e){
-      console.error("Supabase save failed for "+key, e);
-      showToast("Saved on this device, but couldn't sync to the cloud");
+      showToast("⚠️ Cloud sync failed: " + (e && e.message ? e.message : 'unknown error') + " — data saved locally.");
     }
-  } else if(hasClaudeStorage){
-    try{ await window.storage.set(key, json, false); }catch(e){ /* not fatal */ }
+  } else {
+    showToast("⚠️ Supabase not connected — data saved in this browser only.");
   }
-  if(!localOk) showToast("Couldn't save — your browser may be blocking storage for local files");
+  if(!localOk) showToast("❌ Couldn't save — browser may be blocking storage for local files");
 }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
@@ -840,6 +881,12 @@ function go(view, opts){
 function render(){
   const keepY = window.scrollY || 0;
   const app = document.getElementById('app');
+  /* Show login screen if not authenticated */
+  if(!currentUser){
+    app.innerHTML = renderLoginScreen();
+    bindLoginEvents();
+    return;
+  }
   app.innerHTML = layoutShell();
   const content = document.getElementById('content');
   switch(STATE.view){
@@ -871,6 +918,7 @@ function navItem(view, icon, label){
 
 function layoutShell(){
   return `
+  <div style="display:flex;min-height:100vh;width:100%">
   <div class="sidebar">
     <div class="brand">
       <div class="brand-mark">LEDGER</div>
@@ -907,10 +955,14 @@ function layoutShell(){
       <div class="nav-group-label">System</div>
       ${navItem('backup','⇅','Backup & Restore')}
     </div>
-  </div>
+    <div style="margin-top:auto;padding:14px 10px 18px 10px;border-top:1px solid rgba(255,255,255,0.08)">
+      <div style="font-size:11.5px;color:#7684A8;padding:0 10px 6px 10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(currentUser?currentUser.email:'')}">⬤ ${esc(currentUser?currentUser.email:'')}</div>
+      <div class="nav-item" id="btn-signout" style="color:#E07070">⎋ Sign out</div>
+    </div>
   </div>
   <div class="main">
     <div id="content"></div>
+  </div>
   </div>
   <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
   <div class="mobile-topbar">
@@ -919,6 +971,203 @@ function layoutShell(){
   </div>
   <div id="modal-root"></div>
   `;
+}
+
+/* =========================================================
+   AUTH UI
+========================================================= */
+function renderLoginScreen(){
+  return `
+  <div style="min-height:100vh;width:100vw;display:flex;align-items:center;justify-content:center;background:var(--navy);padding:20px 16px">
+    <div style="width:100%;max-width:400px">
+
+      <!-- Brand header -->
+      <div style="text-align:center;margin-bottom:32px">
+        <div style="display:inline-flex;align-items:center;justify-content:center;width:52px;height:52px;background:var(--gold);border-radius:10px;margin-bottom:14px">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:700;color:#fff">L</span>
+        </div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:24px;font-weight:700;color:#fff;letter-spacing:2px">LEDGER</div>
+        <div style="font-size:13px;color:#93A0C2;margin-top:5px;letter-spacing:0.3px">Tuition Management System</div>
+      </div>
+
+      <!-- Card -->
+      <div style="background:#fff;border-radius:10px;padding:28px 28px 24px 28px;box-shadow:0 20px 60px rgba(0,0,0,0.35);width:100%">
+
+        <div id="auth-error" class="alert-error" style="display:none"></div>
+
+        <div class="field mb12">
+          <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Email</label>
+          <input type="email" id="auth-email" placeholder="you@example.com" autocomplete="email"
+            style="border:1.5px solid var(--border);border-radius:6px;padding:10px 12px;font-size:14px;width:100%;outline:none;transition:border-color .15s" />
+        </div>
+        <div class="field mb20">
+          <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Password</label>
+          <div style="position:relative">
+            <input type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password"
+              style="border:1.5px solid var(--border);border-radius:6px;padding:10px 40px 10px 12px;font-size:14px;width:100%;outline:none;transition:border-color .15s" />
+            <button type="button" id="toggle-auth-password"
+              style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-faint);font-size:15px;padding:0;line-height:1">👁</button>
+          </div>
+        </div>
+
+        <button id="auth-submit"
+          style="width:100%;padding:11px;background:var(--navy);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;letter-spacing:0.2px">
+          Sign In
+        </button>
+
+        <!-- Forgot password -->
+        <div style="text-align:center;margin-top:14px">
+          <button type="button" id="auth-forgot-link"
+            style="background:none;border:none;color:var(--text-faint);font-size:12.5px;cursor:pointer;font-family:inherit;padding:0">
+            Forgot password?
+          </button>
+        </div>
+        <div id="auth-forgot-panel" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--border-soft)">
+          <div class="field mb10">
+            <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Your email</label>
+            <input type="email" id="forgot-email" placeholder="you@example.com"
+              style="border:1.5px solid var(--border);border-radius:6px;padding:10px 12px;font-size:14px;width:100%;outline:none" />
+          </div>
+          <button id="forgot-submit"
+            style="width:100%;padding:10px;background:var(--gold);color:#fff;border:none;border-radius:6px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit">
+            Send Reset Email
+          </button>
+          <div id="forgot-msg" style="font-size:12px;margin-top:8px;text-align:center"></div>
+        </div>
+
+        <!-- Create account -->
+        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border-soft);text-align:center">
+          <span style="font-size:12.5px;color:var(--text-faint)">Don't have an account?</span>
+          <button type="button" id="auth-show-signup"
+            style="background:none;border:none;color:var(--navy);font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;margin-left:5px">Create account</button>
+        </div>
+        <div id="auth-signup-panel" style="display:none;margin-top:14px">
+          <div id="auth-signup-error" class="alert-error" style="display:none"></div>
+          <div class="field mb12">
+            <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Email</label>
+            <input type="email" id="signup-email" placeholder="you@example.com" autocomplete="email"
+              style="border:1.5px solid var(--border);border-radius:6px;padding:10px 12px;font-size:14px;width:100%;outline:none" />
+          </div>
+          <div class="field mb16">
+            <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Password</label>
+            <div style="position:relative">
+              <input type="password" id="signup-password" placeholder="••••••••" autocomplete="new-password"
+                style="border:1.5px solid var(--border);border-radius:6px;padding:10px 40px 10px 12px;font-size:14px;width:100%;outline:none" />
+              <button type="button" id="toggle-signup-password"
+                style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-faint);font-size:15px;padding:0;line-height:1">👁</button>
+            </div>
+          </div>
+          <button id="signup-submit"
+            style="width:100%;padding:11px;background:var(--gold);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">
+            Create Account
+          </button>
+          <div id="signup-note" style="display:none;font-size:12px;color:var(--text-soft);margin-top:10px;text-align:center;line-height:1.5">Check your email to confirm your account, then sign in.</div>
+        </div>
+
+      </div>
+
+      <!-- Footer status -->
+      <div style="text-align:center;margin-top:18px;font-size:12px;color:#4A5578">
+        ${sbReady
+          ? '<span style="color:#4CAF82">●</span>&nbsp; Connected to Supabase'
+          : '<span style="color:#4A5578">●</span>&nbsp; Supabase not connected'}
+      </div>
+
+    </div>
+  </div>`;
+}
+function bindLoginEvents(){
+  const submitBtn = document.getElementById('auth-submit');
+  const errBox = document.getElementById('auth-error');
+
+  submitBtn.addEventListener('click', async ()=>{
+    const email = (document.getElementById('auth-email').value||'').trim();
+    const password = (document.getElementById('auth-password').value||'').trim();
+    errBox.style.display = 'none';
+    if(!email || !password){ errBox.textContent='Email and password are required.'; errBox.style.display='block'; return; }
+    submitBtn.disabled = true; submitBtn.textContent = 'Please wait…';
+    try{
+      await signIn(email, password);
+    }catch(e){
+      errBox.textContent = e.message || 'Authentication failed. Please try again.';
+      errBox.style.display = 'block';
+      submitBtn.disabled = false; submitBtn.textContent = 'Sign In';
+    }
+  });
+
+  [document.getElementById('auth-email'), document.getElementById('auth-password')].forEach(el=>{
+    if(el) el.addEventListener('keydown',(e)=>{ if(e.key==='Enter') submitBtn.click(); });
+  });
+
+  /* Forgot password */
+  const forgotLink = document.getElementById('auth-forgot-link');
+  const forgotPanel = document.getElementById('auth-forgot-panel');
+  if(forgotLink) forgotLink.addEventListener('click',()=>{
+    const open = forgotPanel.style.display==='block';
+    forgotPanel.style.display = open ? 'none' : 'block';
+    forgotLink.textContent = open ? 'Forgot password?' : 'Hide';
+    const fe = document.getElementById('forgot-email');
+    if(!open && fe){ fe.value = document.getElementById('auth-email').value||''; fe.focus(); }
+  });
+  const forgotSubmit = document.getElementById('forgot-submit');
+  if(forgotSubmit) forgotSubmit.addEventListener('click', async ()=>{
+    const email = (document.getElementById('forgot-email').value||'').trim();
+    const msgEl = document.getElementById('forgot-msg');
+    if(!email){ msgEl.style.color='var(--red)'; msgEl.textContent='Enter your email address.'; return; }
+    forgotSubmit.disabled=true; forgotSubmit.textContent='Sending…';
+    try{
+      const { error } = await sbClient.auth.resetPasswordForEmail(email, { redirectTo: location.href });
+      if(error) throw error;
+      msgEl.style.color='var(--green)'; msgEl.textContent='Reset email sent — check your inbox.';
+      forgotSubmit.textContent='Sent ✓';
+    }catch(e){
+      msgEl.style.color='var(--red)'; msgEl.textContent = e.message||'Failed to send reset email.';
+      forgotSubmit.disabled=false; forgotSubmit.textContent='Send Reset Email';
+    }
+  });
+
+  /* Show/hide password toggles */
+  document.getElementById('toggle-auth-password').addEventListener('click', function(){
+    const inp = document.getElementById('auth-password');
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    this.textContent = show ? '🙈' : '👁';
+  });
+
+  /* Create account */
+  const showSignup = document.getElementById('auth-show-signup');
+  const signupPanel = document.getElementById('auth-signup-panel');
+  if(showSignup) showSignup.addEventListener('click',()=>{
+    const open = signupPanel.style.display==='block';
+    signupPanel.style.display = open ? 'none' : 'block';
+    showSignup.textContent = open ? 'Create account' : 'Hide';
+    if(!open) document.getElementById('signup-email').focus();
+  });
+  const toggleSignup = document.getElementById('toggle-signup-password');
+  if(toggleSignup) toggleSignup.addEventListener('click', function(){
+    const inp = document.getElementById('signup-password');
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    this.textContent = show ? '🙈' : '👁';
+  });
+  const signupSubmit = document.getElementById('signup-submit');
+  if(signupSubmit) signupSubmit.addEventListener('click', async ()=>{
+    const email = (document.getElementById('signup-email').value||'').trim();
+    const password = (document.getElementById('signup-password').value||'').trim();
+    const errBox2 = document.getElementById('auth-signup-error');
+    errBox2.style.display = 'none';
+    if(!email || !password){ errBox2.textContent='Email and password are required.'; errBox2.style.display='block'; return; }
+    signupSubmit.disabled=true; signupSubmit.textContent='Please wait…';
+    try{
+      await signUp(email, password);
+      document.getElementById('signup-note').style.display='block';
+      signupSubmit.textContent='Account created ✓';
+    }catch(e){
+      errBox2.textContent = e.message||'Sign up failed. Please try again.';
+      errBox2.style.display='block';
+      signupSubmit.disabled=false; signupSubmit.textContent='Create Account';
+    }
+  });
 }
 
 /* =========================================================
@@ -1981,14 +2230,18 @@ const AI_PROVIDERS = {
   nvidia:      { label:'NVIDIA',                   lsKey:'tuitionManager_ai_nvidia',      vision:true,  defaultModel:'nvidia/llama-3.2-11b-vision-instruct' }
 };
 
+/* ---- AI keys: local-only, user-scoped, never in DATA or Supabase ---- */
 function getStoredApiKey(providerId){
-  return (DATA.aiKeys && DATA.aiKeys[providerId]) || '';
+  if(!currentUser) return '';
+  try{ return localStorage.getItem(AI_KEY_LS_PREFIX + currentUser.id + '_' + providerId) || ''; }catch(e){ return ''; }
 }
-async function saveApiKey(providerId, key){
-  if(!AI_PROVIDERS[providerId]) return;
-  if(key) DATA.aiKeys[providerId] = key;
-  else delete DATA.aiKeys[providerId];
-  await save(STORE_KEYS.aiKeys);
+function saveApiKey(providerId, key){
+  if(!AI_PROVIDERS[providerId] || !currentUser) return;
+  try{
+    if(key) localStorage.setItem(AI_KEY_LS_PREFIX + currentUser.id + '_' + providerId, key);
+    else localStorage.removeItem(AI_KEY_LS_PREFIX + currentUser.id + '_' + providerId);
+  }catch(e){}
+  render();
 }
 function removeApiKey(providerId){ saveApiKey(providerId, ''); }
 function configuredProviders(){ return Object.keys(AI_PROVIDERS).filter(id=>getStoredApiKey(id)); }
@@ -2188,7 +2441,7 @@ function viewAIHelper(){
       <div class="panel">
         <div class="panel-title mb8">Configure API Key</div>
         <div class="muted mb12" style="font-size:12.5px">
-          <b>Security notice:</b> API keys are saved to your Supabase database (if connected) and your browser's local storage. They are sent directly from your browser to the AI provider's API only — not to any other server. Restrict your keys using the provider's API restrictions where available, and monitor your usage regularly.
+          <b>Security notice:</b> API keys are stored only in <b>this browser's localStorage</b>, scoped to your account. They are never sent to Supabase or included in backups. They are sent directly from your browser to the AI provider's API only. Restrict your keys using the provider's API restrictions where available, and monitor your usage regularly.
           <br/><br/>Availability of free usage depends on the provider's current pricing and account terms.
         </div>
         <div class="field mb8"><label>Provider</label>
@@ -2650,32 +2903,36 @@ function viewBackup(){
   const sharedConfigStarted = !!(SHARED_SUPABASE_CONFIG.url.trim() || SHARED_SUPABASE_CONFIG.anonKey.trim());
   const connected = !!(cfg && sbReady);
   const configured = !!cfg;
+  const userEmail = currentUser ? currentUser.email : '';
   return `
-  <div class="topbar"><div><div class="page-title">Backup & Restore</div><div class="page-sub">Export your data as a file, restore from a backup, or turn on live cloud sync</div></div></div>
+  <div class="topbar"><div><div class="page-title">Backup & Restore</div><div class="page-sub">Export your data as a file, restore from a backup, or configure cloud sync</div></div></div>
 
   <div class="panel">
     <div class="flex-between mb8" style="flex-wrap:wrap;gap:8px">
       <div class="panel-title">Cloud sync (Supabase)</div>
-      <span class="flex gap6" style="font-size:12.5px"><span class="sync-dot ${connected?'on':'off'}"></span>${connected? 'Connected — data is shared live' : (configured? 'Configured, but not connected' : 'Not connected — using this browser only')}</span>
+      <span class="flex gap6" style="font-size:12.5px"><span class="sync-dot ${connected?'on':'off'}"></span>${connected? 'Connected — syncing as '+esc(userEmail) : (configured? 'Configured, but not connected' : 'Not connected — using this browser only')}</span>
     </div>
     <div class="muted mb12" style="font-size:12.5px">
-      Connect a free Supabase project so everyone who opens this page shares the same live data instead of each browser keeping its own copy. To connect automatically on every device, add the Project URL and anon/public key to <span class="mono">SHARED_SUPABASE_CONFIG</span> near the top of this file before publishing it. Do not use a service_role or secret key.
+      Connect a Supabase project so your data syncs across devices. Each user's data is isolated by Supabase Auth and Row Level Security — only you can read or write your own records.
       <br/><br/>
-      <b>One-time setup:</b> go to <span class="mono">supabase.com</span> → sign in with email or GitHub → New project → open the <b>SQL Editor</b> and run:
-      <pre class="ai-answer" style="margin:8px 0;font-size:11.5px">create table tuition_ledger (
-  key text primary key,
-  json text,
-  updated_at timestamptz default now()
-);
-alter table tuition_ledger enable row level security;
-create policy "anon read/write" on tuition_ledger
-  for all using (true) with check (true);</pre>
-      <b>Security:</b> this example policy allows anyone with the project URL and anon key to read and write every row. Do not use it for sensitive data; configure Supabase Auth and restrictive RLS policies before publishing private data.
-      <br/><br/>
-      Then turn on <b>Realtime</b> for the table (Database → Replication → toggle it on for tuition_ledger), and copy the <b>Project URL</b> and <b>anon public</b> key from Project Settings → API into the app configuration.
+      <b>One-time database setup</b> (run in Supabase SQL Editor — see <span class="mono">supabase/migrations/001_secure_tuition_ledger.sql</span> for the full migration):
+      <pre class="ai-answer" style="margin:8px 0;font-size:11.5px">-- Add user_id column and change primary key to (user_id, key)
+ALTER TABLE tuition_ledger ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES auth.users(id) ON DELETE CASCADE;
+ALTER TABLE tuition_ledger DROP CONSTRAINT IF EXISTS tuition_ledger_pkey;
+ALTER TABLE tuition_ledger ADD PRIMARY KEY (user_id, key);
+CREATE INDEX IF NOT EXISTS idx_tuition_ledger_user_id ON tuition_ledger(user_id);
+-- Enable RLS with per-user policies (no anon access)
+ALTER TABLE tuition_ledger ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "select_own" ON tuition_ledger FOR SELECT TO authenticated USING ((SELECT auth.uid()) = user_id);
+CREATE POLICY "insert_own" ON tuition_ledger FOR INSERT TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id);
+CREATE POLICY "update_own" ON tuition_ledger FOR UPDATE TO authenticated USING ((SELECT auth.uid()) = user_id) WITH CHECK ((SELECT auth.uid()) = user_id);
+CREATE POLICY "delete_own" ON tuition_ledger FOR DELETE TO authenticated USING ((SELECT auth.uid()) = user_id);
+GRANT SELECT, INSERT, UPDATE, DELETE ON tuition_ledger TO authenticated;
+REVOKE ALL ON tuition_ledger FROM anon;</pre>
+      Then enable <b>Realtime</b> for the table (Supabase Dashboard → Database → Replication → toggle on for tuition_ledger).
+      <br/>Copy the <b>Project URL</b> and <b>anon public key</b> from Project Settings → API into the boxes below (or into <span class="mono">SHARED_SUPABASE_CONFIG</span> in the file for automatic connection).
     </div>
-    ${sharedConfig?`<div class="hint mb8">Using the shared project configuration from this file. Every device running this same published copy connects automatically.</div>`:''}
-    ${sharedConfigStarted&&!sharedConfig?`<div class="hint mb8" style="color:var(--red)">Shared configuration is incomplete. Add the anon/public key to SHARED_SUPABASE_CONFIG and publish this file again to enable automatic connection on every device.</div>`:''}
+    ${sharedConfig?`<div class="hint mb8">Using the shared project configuration from this file. Every device running this published copy connects automatically.</div>`:''}
     <div class="form-grid" style="${sharedConfigStarted?'display:none':''}">
       <div class="field span2"><label>Project URL</label><input id="sb-url" value="${esc(cfg?cfg.url:'')}" placeholder="https://xxxxxxxx.supabase.co" ${sharedConfig?'readonly':''} /></div>
       <div class="field span2"><label>Anon public key</label><input id="sb-anonKey" value="${esc(cfg?cfg.anonKey:'')}" placeholder="eyJhbGciOi…" /></div>
@@ -2689,18 +2946,18 @@ create policy "anon read/write" on tuition_ledger
 
   <div class="panel">
     <div class="panel-title mb8">Export</div>
-    <div class="muted mb12" style="font-size:13px">Downloads all teachers, students, timetables, homework, payments, attendance and test data as a single JSON file.</div>
+    <div class="muted mb12" style="font-size:13px">Downloads teachers, students, timetables, homework, payments, attendance and test data as a JSON file. AI API keys and authentication tokens are <b>not</b> included.</div>
     <button class="btn btn-primary" id="btn-export">Download backup (.json)</button>
   </div>
   <div class="panel">
     <div class="panel-title mb8">Import</div>
-    <div class="muted mb12" style="font-size:13px">Restoring will replace all current data with the contents of the backup file.</div>
+    <div class="muted mb12" style="font-size:13px">Restoring will replace all current data with the contents of the backup file. Imported data is associated with your account only.</div>
     <input type="file" id="import-file" accept="application/json" />
   </div>
   <div class="panel">
     <div class="panel-title mb8" style="color:var(--red)">Reset all data</div>
-    <div class="muted mb12" style="font-size:13px">Permanently clears every record. This cannot be undone — export a backup first.</div>
-    <button class="btn btn-danger" id="btn-reset">Clear all data</button>
+    <div class="muted mb12" style="font-size:13px">Permanently clears <b>your</b> records only. Other users are not affected. This cannot be undone — export a backup first.</div>
+    <button class="btn btn-danger" id="btn-reset">Clear my data</button>
   </div>
   `;
 }
@@ -2712,6 +2969,7 @@ async function handleSupabaseSave(){
   const statusEl = document.getElementById('sb-status');
   if(!cfg.url || !cfg.anonKey){ statusEl.textContent = "Both the Project URL and anon key are required."; statusEl.style.color = 'var(--red)'; return; }
   if(!/^https:\/\/.+\.supabase\.co$/.test(cfg.url)){ statusEl.textContent = "That doesn't look like a Supabase project URL (should look like https://xxxx.supabase.co)."; statusEl.style.color = 'var(--red)'; return; }
+  if(!currentUser){ statusEl.textContent = "Sign in first before connecting cloud sync."; statusEl.style.color = 'var(--red)'; return; }
   statusEl.textContent = "Connecting…"; statusEl.style.color = '';
   unsubscribeSupabase();
   sbReady = false; sbClient = null;
@@ -2719,19 +2977,20 @@ async function handleSupabaseSave(){
   try{
     const ok = await initSupabase();
     if(!ok) throw new Error("Couldn't load the Supabase client.");
-    // round-trip test write/read so a wrong key or missing table is caught here, not silently later
-    const { error: writeErr } = await sbClient.from('tuition_ledger').upsert({ key:'_connectionTest', json: String(Date.now()), updated_at: new Date().toISOString() });
-    if(writeErr) throw writeErr;
-    statusEl.style.color = 'var(--green)'; statusEl.textContent = "Connected — uploading your current data…";
+    /* Verify connection with a user-scoped read — no global writes */
+    const { error: testErr } = await sbClient.from('tuition_ledger')
+      .select('key').eq('user_id', currentUser.id).limit(1);
+    if(testErr) throw testErr;
+    statusEl.style.color = 'var(--green)'; statusEl.textContent = "Connected — uploading your data…";
+    /* Upload only tuition data keys, never aiKeys */
     await Promise.all(Object.values(STORE_KEYS).map(k=>save(k)));
     subscribeSupabase();
     showToast("Cloud sync connected");
     render();
   }catch(e){
-    console.error(e);
     sbReady = false;
     statusEl.style.color = 'var(--red)';
-    statusEl.textContent = "Couldn't connect — check the URL and key, and that you ran the table-creation SQL in Supabase's SQL editor (see above). Error: " + (e && e.message ? e.message : 'unknown');
+    statusEl.textContent = "Couldn't connect — check the URL and key, and that you ran the migration SQL. Error: " + (e && e.message ? e.message : 'unknown');
   }
 }
 function handleSupabaseDisconnect(){
@@ -2743,7 +3002,10 @@ function handleSupabaseDisconnect(){
   render();
 }
 function exportBackup(){
-  const blob = new Blob([JSON.stringify(DATA,null,2)], {type:'application/json'});
+  /* aiKeys intentionally excluded — never export credentials */
+  const exportData = {};
+  Object.keys(STORE_KEYS).forEach(k=>{ exportData[k] = DATA[k]; });
+  const blob = new Blob([JSON.stringify(exportData,null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = 'tuition-backup-'+todayISO()+'.json';
@@ -2755,22 +3017,40 @@ async function importBackup(file){
   try{
     const text = await file.text();
     const parsed = JSON.parse(text);
-    if(!confirm("This will replace all current data with the backup file. Continue?")) return;
-    Object.keys(STORE_KEYS).forEach(k=>{ if(parsed[k]!==undefined) DATA[k]=parsed[k]; });
+    if(!confirm("This will replace all your current data with the backup file. Continue?")) return;
+    /* Strip any user_id or aiKeys from imported data — never trust imported ownership */
+    Object.keys(STORE_KEYS).forEach(k=>{
+      if(parsed[k]!==undefined){
+        let val = parsed[k];
+        /* Strip user_id from any array records */
+        if(Array.isArray(val)) val = val.map(r=>{ const c={...r}; delete c.user_id; return c; });
+        DATA[k] = val;
+      }
+    });
+    /* aiKeys from backup are silently ignored */
     await Promise.all(Object.values(STORE_KEYS).map(k=>save(k)));
     showToast("Backup restored");
     render();
   }catch(e){
-    console.error(e);
     showToast("Couldn't read that file — is it a valid backup?");
   }
 }
 async function resetAllData(){
-  if(!confirm("This permanently deletes ALL data. Are you absolutely sure?")) return;
-  if(!confirm("Last check — this cannot be undone. Clear everything?")) return;
-  DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], aiKeys:{} };
-  await Promise.all(Object.values(STORE_KEYS).map(k=>save(k)));
-  showToast("All data cleared");
+  if(!currentUser){ showToast("Not signed in."); return; }
+  if(!confirm("This permanently deletes ALL your data. Are you absolutely sure?")) return;
+  if(!confirm("Last check — this cannot be undone. Clear your data?")) return;
+  resetDataInMemory();
+  /* Delete only this user's cloud rows */
+  if(sbReady && sbClient){
+    try{
+      await sbClient.from('tuition_ledger').delete().eq('user_id', currentUser.id);
+    }catch(e){ showToast("Cloud delete failed — local data cleared."); }
+  }
+  /* Clear user-scoped localStorage */
+  Object.values(STORE_KEYS).forEach(k=>{
+    try{ localStorage.removeItem(localKey(k)); }catch(e){}
+  });
+  showToast("Your data has been cleared");
   go('dashboard');
 }
 
@@ -2932,6 +3212,12 @@ function enhanceTables(){
 }
 
 function bindGlobalEvents(){
+  // Sign out
+  const signOutBtn = document.getElementById('btn-signout');
+  if(signOutBtn) signOutBtn.addEventListener('click',()=>{
+    if(confirm('Sign out? Your data is saved in the cloud and will be available when you sign back in.')) signOut();
+  });
+
   // Mobile sidebar toggle
   const hamburgerBtn = document.getElementById('hamburger-btn');
   const sidebarBackdrop = document.getElementById('sidebar-backdrop');
@@ -3013,14 +3299,14 @@ function bindGlobalEvents(){
     const pid = (document.getElementById('ai-settings-provider')||{}).value;
     const val = (document.getElementById('ai-settings-key')||{}).value.trim();
     if(!pid||!val){ showToast('Select a provider and paste a key first.'); return; }
-    saveApiKey(pid, val).then(()=>{ showToast((AI_PROVIDERS[pid]||{}).label+' key saved'); render(); });
+    saveApiKey(pid, val); showToast((AI_PROVIDERS[pid]||{}).label+' key saved'); render();
   });
   // Remove key
   const aiKeyRemove = document.getElementById('ai-key-remove');
   if(aiKeyRemove) aiKeyRemove.addEventListener('click',()=>{
     const pid = (document.getElementById('ai-settings-provider')||{}).value;
     if(!pid) return;
-    removeApiKey(pid).then(()=>{ showToast((AI_PROVIDERS[pid]||{}).label+' key removed'); render(); });
+    removeApiKey(pid); showToast((AI_PROVIDERS[pid]||{}).label+' key removed'); render();
   });
   // Test key
   const aiKeyTest = document.getElementById('ai-key-test');
@@ -3117,7 +3403,39 @@ function renderDashboardSearchOnly(){
    INIT
 ========================================================= */
 async function init(){
+  const ok = await initSupabase();
+  if(ok){
+    /* Wait for auth session to restore before loading data */
+    await new Promise(async resolve => {
+      const { data: { session } } = await sbClient.auth.getSession();
+      currentUser = session ? session.user : null;
+      authReady = true;
+      resolve();
+    });
+    /* Set up ongoing auth state listener */
+    sbClient.auth.onAuthStateChange(async (event, session)=>{
+      const prevUserId = currentUser ? currentUser.id : null;
+      currentUser = session ? session.user : null;
+      authReady = true;
+      if(event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED'){
+        if(currentUser && currentUser.id !== prevUserId){
+          resetDataInMemory();
+          unsubscribeSupabase();
+          await loadAll();
+          subscribeSupabase();
+        }
+        render();
+      } else if(event === 'SIGNED_OUT'){
+        resetDataInMemory();
+        unsubscribeSupabase();
+        render();
+      }
+    });
+  } else {
+    authReady = true;
+  }
   await loadAll();
+  if(currentUser) subscribeSupabase();
   render();
 }
 init();
