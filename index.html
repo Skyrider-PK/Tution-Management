@@ -596,6 +596,12 @@ let STATE = { view:"dashboard", selectedId:null, detailTab:null, search:"", paym
    rendered inside a Claude.ai artifact panel — never required.
 ========================================================= */
 const LOCAL_PREFIX = "tuitionLedger_";
+// Set these once before publishing to share the same Supabase project across devices.
+// Use only the anon/public key here; never put a service_role or secret key in this file.
+const SHARED_SUPABASE_CONFIG = {
+  url: "https://jlbjszgcivpexonaaoqb.supabase.co",
+  anonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpsYmpzemdjaXZwZXhvbmFhb3FiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTExODAzNTksImV4cCI6MjEwNjc1NjM1OX0.uIIhyqo9Tj_gXXGXulJ6aUCiNUlwFc7fwATyCtipROM"
+};
 const hasClaudeStorage = (function(){
   try{ return typeof window.storage !== 'undefined' && window.storage && typeof window.storage.get === 'function'; }
   catch(e){ return false; }
@@ -619,7 +625,14 @@ const hasClaudeStorage = (function(){
    --------------------------------------------------------------- */
 let sbClient = null, sbReady = false, sbLoading = false, sbChannel = null;
 const lastWrittenJson = {};
+function getSharedSupabaseConfig(){
+  const url = SHARED_SUPABASE_CONFIG.url.trim().replace(/\/$/,'');
+  const anonKey = SHARED_SUPABASE_CONFIG.anonKey.trim();
+  return url && anonKey ? {url, anonKey} : null;
+}
 function getSupabaseConfig(){
+  const sharedConfig = getSharedSupabaseConfig();
+  if(sharedConfig) return sharedConfig;
   try{ const raw = localStorage.getItem(LOCAL_PREFIX+'sbConfig'); return raw? JSON.parse(raw) : null; }
   catch(e){ return null; }
 }
@@ -2633,6 +2646,8 @@ function viewRegister(){
 ========================================================= */
 function viewBackup(){
   const cfg = getSupabaseConfig();
+  const sharedConfig = getSharedSupabaseConfig();
+  const sharedConfigStarted = !!(SHARED_SUPABASE_CONFIG.url.trim() || SHARED_SUPABASE_CONFIG.anonKey.trim());
   const connected = !!(cfg && sbReady);
   const configured = !!cfg;
   return `
@@ -2644,7 +2659,7 @@ function viewBackup(){
       <span class="flex gap6" style="font-size:12.5px"><span class="sync-dot ${connected?'on':'off'}"></span>${connected? 'Connected — data is shared live' : (configured? 'Configured, but not connected' : 'Not connected — using this browser only')}</span>
     </div>
     <div class="muted mb12" style="font-size:12.5px">
-      Connect a free Supabase project so everyone who opens this page (e.g. once uploaded to GitHub Pages) shares the same live data instead of each browser keeping its own copy. No phone verification required to sign up.
+      Connect a free Supabase project so everyone who opens this page shares the same live data instead of each browser keeping its own copy. To connect automatically on every device, add the Project URL and anon/public key to <span class="mono">SHARED_SUPABASE_CONFIG</span> near the top of this file before publishing it. Do not use a service_role or secret key.
       <br/><br/>
       <b>One-time setup:</b> go to <span class="mono">supabase.com</span> → sign in with email or GitHub → New project → open the <b>SQL Editor</b> and run:
       <pre class="ai-answer" style="margin:8px 0;font-size:11.5px">create table tuition_ledger (
@@ -2655,15 +2670,19 @@ function viewBackup(){
 alter table tuition_ledger enable row level security;
 create policy "anon read/write" on tuition_ledger
   for all using (true) with check (true);</pre>
-      Then turn on <b>Realtime</b> for the table (Database → Replication → toggle it on for tuition_ledger), and copy the <b>Project URL</b> and <b>anon public</b> key from Project Settings → API into the two boxes below.
+      <b>Security:</b> this example policy allows anyone with the project URL and anon key to read and write every row. Do not use it for sensitive data; configure Supabase Auth and restrictive RLS policies before publishing private data.
+      <br/><br/>
+      Then turn on <b>Realtime</b> for the table (Database → Replication → toggle it on for tuition_ledger), and copy the <b>Project URL</b> and <b>anon public</b> key from Project Settings → API into the app configuration.
     </div>
-    <div class="form-grid">
-      <div class="field span2"><label>Project URL</label><input id="sb-url" value="${esc(cfg?cfg.url:'')}" placeholder="https://xxxxxxxx.supabase.co" /></div>
+    ${sharedConfig?`<div class="hint mb8">Using the shared project configuration from this file. Every device running this same published copy connects automatically.</div>`:''}
+    ${sharedConfigStarted&&!sharedConfig?`<div class="hint mb8" style="color:var(--red)">Shared configuration is incomplete. Add the anon/public key to SHARED_SUPABASE_CONFIG and publish this file again to enable automatic connection on every device.</div>`:''}
+    <div class="form-grid" style="${sharedConfigStarted?'display:none':''}">
+      <div class="field span2"><label>Project URL</label><input id="sb-url" value="${esc(cfg?cfg.url:'')}" placeholder="https://xxxxxxxx.supabase.co" ${sharedConfig?'readonly':''} /></div>
       <div class="field span2"><label>Anon public key</label><input id="sb-anonKey" value="${esc(cfg?cfg.anonKey:'')}" placeholder="eyJhbGciOi…" /></div>
     </div>
     <div class="flex gap8 mt8" style="flex-wrap:wrap">
-      <button class="btn btn-primary btn-sm" id="sb-save">Save &amp; connect</button>
-      ${configured? `<button class="btn btn-ghost btn-sm" id="sb-disconnect">Disconnect</button>`:''}
+      ${sharedConfigStarted?'':`<button class="btn btn-primary btn-sm" id="sb-save">Save &amp; connect</button>
+      ${configured? `<button class="btn btn-ghost btn-sm" id="sb-disconnect">Disconnect</button>`:''}`}
     </div>
     <div id="sb-status" class="hint mt8"></div>
   </div>
