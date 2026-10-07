@@ -3334,6 +3334,45 @@ function enhanceTables(){
   });
 }
 
+function openBulkWAModal(targets){
+  /* targets: [{label, phone, type, ctx}] */
+  const tpl = getDefaultWATemplate(targets[0].type);
+  const preview = tpl ? (()=>{
+    const first = targets[0];
+    let msg = tpl.body;
+    if(first.type==='fee' && first.ctx){
+      const parts=(first.ctx.cycleKey||'').split('-').map(Number);
+      msg=msg.replace(/\{month\}/gi,parts[1]?MONTH_NAMES[parts[1]-1]:'').replace(/\{year\}/gi,parts[0]?String(parts[0]):'');
+    }
+    if(first.type==='absent' && first.ctx){
+      const d=first.ctx.date?new Date(first.ctx.date+'T00:00:00'):new Date();
+      msg=msg.replace(/\{date\}/gi,d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})).replace(/\{day\}/gi,['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getDay()]);
+    }
+    return msg;
+  })() : '';
+  const rows = targets.map((t,i)=>{
+    const digits=(t.phone||'').replace(/\D/g,'');
+    const url='https://wa.me/'+digits+'?text='+encodeURIComponent(preview);
+    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border-soft)" id="bulk-row-${i}">
+      <span style="font-size:13.5px">${esc(t.label)}</span>
+      <a href="${url}" target="_blank" class="btn btn-sm" style="background:#25D366;color:#fff;border-color:#25D366;text-decoration:none" onclick="document.getElementById('bulk-row-${i}').style.opacity='0.4'">📲 Open WhatsApp</a>
+    </div>`;
+  }).join('');
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+  <div class="modal-overlay" id="modal-overlay">
+    <div class="modal">
+      <div class="modal-head"><div class="modal-title">📲 Send WhatsApp — ${targets.length} student${targets.length===1?'':'s'}</div><button class="modal-close" id="modal-close">✕</button></div>
+      <div class="muted mb12" style="font-size:12.5px">Tap each button to open WhatsApp for that student. Come back here after each one to send the next.</div>
+      <div>${rows}</div>
+      <div class="form-actions"><button type="button" class="btn btn-primary" id="modal-cancel">Done</button></div>
+    </div>
+  </div>`;
+  document.getElementById('modal-close').onclick = closeModal;
+  document.getElementById('modal-cancel').onclick = closeModal;
+  document.getElementById('modal-overlay').addEventListener('click',(e)=>{ if(e.target.id==='modal-overlay') closeModal(); });
+}
+
 function bindGlobalEvents(){
   // Sign out
   const signOutBtn = document.getElementById('btn-signout');
@@ -3545,8 +3584,7 @@ function bindGlobalEvents(){
       return {s, cycleKey, status: feeStatus(pay)};
     }).filter(r=>r.status!=='Paid' && !!(r.s.phone||'').replace(/\D/g,''));
     if(!targets.length){ showToast('No unpaid students with a phone number.'); return; }
-    if(!confirm('This will open '+targets.length+' WhatsApp tab(s) — one per unpaid student. Continue?')) return;
-    targets.forEach((r,i)=>setTimeout(()=>sendWhatsApp(r.s.phone,'fee',{cycleKey:r.cycleKey}), i*600));
+    openBulkWAModal(targets.map(r=>({label:r.s.name+' — '+r.cycleKey, phone:r.s.phone, type:'fee', ctx:{cycleKey:r.cycleKey}})));
   });
   /* Bulk WhatsApp — send all absent */
   const waAllAbsent = document.getElementById('btn-wa-all-absent');
@@ -3557,8 +3595,7 @@ function bindGlobalEvents(){
     DATA.attendance.filter(a=>a.date===dateVal && a.teacherId===teacherId).forEach(a=>marks[a.studentId]=a.status);
     const targets = DATA.students.filter(s=>(s.shares||[]).some(sh=>sh.teacherId===teacherId) && marks[s.id]==='Absent' && !!(s.phone||'').replace(/\D/g,''));
     if(!targets.length){ showToast('No absent students with a phone number.'); return; }
-    if(!confirm('This will open '+targets.length+' WhatsApp tab(s) — one per absent student. Continue?')) return;
-    targets.forEach((s,i)=>setTimeout(()=>sendWhatsApp(s.phone,'absent',{date:dateVal}), i*600));
+    openBulkWAModal(targets.map(s=>({label:s.name, phone:s.phone, type:'absent', ctx:{date:dateVal}})));
   });
 
   enhanceTables();
