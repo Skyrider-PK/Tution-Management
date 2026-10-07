@@ -589,8 +589,20 @@ function getWATemplates(type){ return (DATA.waTemplates||[]).filter(t=>t.type===
 function getDefaultWATemplate(type){ return (DATA.waTemplates||[]).find(t=>t.type===type && t.isDefault); }
 function ensureWADefaults(){
   if(!DATA.waTemplates) DATA.waTemplates=[];
-  if(!DATA.waTemplates.some(t=>t.type==='fee')) DATA.waTemplates.push({id:uid(),...WA_DEFAULT_FEE,isDefault:true});
-  if(!DATA.waTemplates.some(t=>t.type==='absent')) DATA.waTemplates.push({id:uid(),...WA_DEFAULT_ABS,isDefault:true});
+  ['fee','absent'].forEach(type=>{
+    const def = type==='fee' ? WA_DEFAULT_FEE : WA_DEFAULT_ABS;
+    const placeholders = type==='fee' ? ['{month}','{year}'] : ['{date}','{day}'];
+    const existing = DATA.waTemplates.find(t=>t.type===type && t.isDefault);
+    if(!existing){
+      if(!DATA.waTemplates.some(t=>t.type===type)){
+        DATA.waTemplates.push({id:uid(),...def,isDefault:true});
+      }
+    } else if(!placeholders.some(p=>existing.body.includes(p))){
+      /* Default template exists but has no placeholders — update its body */
+      existing.body = def.body;
+      save(STORE_KEYS.waTemplates);
+    }
+  });
 }
 function sendWhatsApp(phone, type, ctx){
   const tpl = getDefaultWATemplate(type);
