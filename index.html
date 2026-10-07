@@ -2676,7 +2676,12 @@ function viewPayments(){
   </div>
 
   <div class="panel">
-    <div class="panel-title mb12">Student fee status — ${label}</div>
+    <div class="flex-between mb12" style="flex-wrap:wrap;gap:10px">
+      <div class="panel-title">Student fee status — ${label}</div>
+      ${rows.filter(r=>r.status!=='Paid' && !!(r.s.phone||'').replace(/\D/g,'')).length>0
+        ? `<button class="btn btn-sm" style="background:#25D366;color:#fff;border-color:#25D366" id="btn-wa-all-unpaid">📲 Send all unpaid (${rows.filter(r=>r.status!=='Paid' && !!(r.s.phone||'').replace(/\D/g,'')).length})</button>`
+        : ''}
+    </div>
     ${rows.length===0? emptyState("No students yet",""):
     `<table><thead><tr><th>Student</th><th>Cycle</th><th>Total fee</th><th>Due</th><th>Status</th><th>Mark as</th><th>WhatsApp</th></tr></thead><tbody>
     ${rows.map(r=>{
@@ -2740,7 +2745,13 @@ function viewAttendance(){
       <div class="field" style="max-width:240px"><label>Teacher</label><select id="att-teacher">${DATA.teachers.map(t=>`<option value="${t.id}" ${teacherId===t.id?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div>
     </div>
     ${relevantStudents.length===0? emptyState("No students linked to this teacher",""):
-    `<table><thead><tr><th>Student</th><th>Class</th><th>Status</th><th>WhatsApp</th></tr></thead><tbody>
+    `<div class="flex-between mb12" style="flex-wrap:wrap;gap:10px">
+      <div></div>
+      ${relevantStudents.filter(s=>marks[s.id]==='Absent' && !!(s.phone||'').replace(/\D/g,'')).length>0
+        ? `<button class="btn btn-sm" style="background:#25D366;color:#fff;border-color:#25D366" id="btn-wa-all-absent">📲 Send all absent (${relevantStudents.filter(s=>marks[s.id]==='Absent' && !!(s.phone||'').replace(/\D/g,'')).length})</button>`
+        : ''}
+    </div>
+    <table><thead><tr><th>Student</th><th>Class</th><th>Status</th><th>WhatsApp</th></tr></thead><tbody>
     ${relevantStudents.map(s=>{
       const isAbsent = marks[s.id]==='Absent';
       const hasPhone = !!(s.phone||'').replace(/\D/g,'');
@@ -3524,6 +3535,31 @@ function bindGlobalEvents(){
   document.querySelectorAll('[data-wa-absent]').forEach(el=>el.addEventListener('click',()=>{
     const s=findStudent(el.getAttribute('data-wa-absent')); if(s) sendWhatsApp(s.phone,'absent',{date:el.getAttribute('data-wa-date')});
   }));
+  /* Bulk WhatsApp — send all unpaid */
+  const waAllUnpaid = document.getElementById('btn-wa-all-unpaid');
+  if(waAllUnpaid) waAllUnpaid.addEventListener('click',()=>{
+    const ref = STATE.paymentsMonth;
+    const targets = DATA.students.map(s=>{
+      const {cycleKey} = getCycleForMonth(s, ref);
+      const pay = getPaymentRecord(s.id, cycleKey);
+      return {s, cycleKey, status: feeStatus(pay)};
+    }).filter(r=>r.status!=='Paid' && !!(r.s.phone||'').replace(/\D/g,''));
+    if(!targets.length){ showToast('No unpaid students with a phone number.'); return; }
+    if(!confirm('This will open '+targets.length+' WhatsApp tab(s) — one per unpaid student. Continue?')) return;
+    targets.forEach((r,i)=>setTimeout(()=>sendWhatsApp(r.s.phone,'fee',{cycleKey:r.cycleKey}), i*600));
+  });
+  /* Bulk WhatsApp — send all absent */
+  const waAllAbsent = document.getElementById('btn-wa-all-absent');
+  if(waAllAbsent) waAllAbsent.addEventListener('click',()=>{
+    const dateVal = STATE.attDate || todayISO();
+    const teacherId = STATE.attTeacher || (DATA.teachers[0]&&DATA.teachers[0].id) || '';
+    const marks = {};
+    DATA.attendance.filter(a=>a.date===dateVal && a.teacherId===teacherId).forEach(a=>marks[a.studentId]=a.status);
+    const targets = DATA.students.filter(s=>(s.shares||[]).some(sh=>sh.teacherId===teacherId) && marks[s.id]==='Absent' && !!(s.phone||'').replace(/\D/g,''));
+    if(!targets.length){ showToast('No absent students with a phone number.'); return; }
+    if(!confirm('This will open '+targets.length+' WhatsApp tab(s) — one per absent student. Continue?')) return;
+    targets.forEach((s,i)=>setTimeout(()=>sendWhatsApp(s.phone,'absent',{date:dateVal}), i*600));
+  });
 
   enhanceTables();
 }
