@@ -583,8 +583,8 @@ const STORE_KEYS = {
   studentTT:"studentTimetables", homework:"homework", payments:"payments",
   attendance:"attendance", tests:"testResults", waTemplates:"waTemplates"
 };
-const WA_DEFAULT_FEE = { name:"Fee Reminder", body:"Dear guardian, this is a reminder that the monthly fee is due. Please arrange payment at your earliest convenience. Thank you.", type:"fee" };
-const WA_DEFAULT_ABS = { name:"Absent Notice", body:"Dear guardian, your child was marked absent today. Please ensure regular attendance. Thank you.", type:"absent" };
+const WA_DEFAULT_FEE = { name:"Fee Reminder", body:"Dear guardian, this is a reminder that the fee for {month} {year} is due. Please arrange payment at your earliest convenience. Thank you.", type:"fee" };
+const WA_DEFAULT_ABS = { name:"Absent Notice", body:"Dear guardian, your child was marked absent on {day}, {date}. Please ensure regular attendance. Thank you.", type:"absent" };
 function getWATemplates(type){ return (DATA.waTemplates||[]).filter(t=>t.type===type); }
 function getDefaultWATemplate(type){ return (DATA.waTemplates||[]).find(t=>t.type===type && t.isDefault); }
 function ensureWADefaults(){
@@ -592,12 +592,25 @@ function ensureWADefaults(){
   if(!DATA.waTemplates.some(t=>t.type==='fee')) DATA.waTemplates.push({id:uid(),...WA_DEFAULT_FEE,isDefault:true});
   if(!DATA.waTemplates.some(t=>t.type==='absent')) DATA.waTemplates.push({id:uid(),...WA_DEFAULT_ABS,isDefault:true});
 }
-function sendWhatsApp(phone, type){
+function sendWhatsApp(phone, type, ctx){
   const tpl = getDefaultWATemplate(type);
   if(!tpl){ showToast('Set a default template in Backup & Restore page first.'); return; }
   const digits = (phone||'').replace(/\D/g,'');
   if(!digits){ showToast('No WhatsApp number on file for this student.'); return; }
-  window.open('https://wa.me/'+digits+'?text='+encodeURIComponent(tpl.body), '_blank');
+  let msg = tpl.body;
+  if(type==='fee' && ctx){
+    const parts = (ctx.cycleKey||'').split('-').map(Number);
+    const mon = parts[1]? MONTH_NAMES[parts[1]-1] : '';
+    const yr = parts[0]? String(parts[0]) : '';
+    msg = msg.replace(/\{month\}/gi, mon).replace(/\{year\}/gi, yr);
+  }
+  if(type==='absent' && ctx){
+    const d = ctx.date ? new Date(ctx.date+'T00:00:00') : new Date();
+    const dayName = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getDay()];
+    const dateStr = d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+    msg = msg.replace(/\{date\}/gi, dateStr).replace(/\{day\}/gi, dayName);
+  }
+  window.open('https://wa.me/'+digits+'?text='+encodeURIComponent(msg), '_blank');
 }
 const AI_KEY_LS_PREFIX = "tuitionLedger_ai_";
 
@@ -2665,7 +2678,7 @@ function viewPayments(){
         <td>${statusBadge(r.status)}</td>
         <td>${statusControl(r.s.id, r.cycleKey, r.status==='Paid')}</td>
         <td>${waDue
-          ? `<button class="btn btn-sm" style="background:#25D366;color:#fff;border-color:#25D366" ${!hasPhone?'disabled title="No WhatsApp number on file"':''} data-wa-fee="${r.s.id}">📲 Send</button>`
+          ? `<button class="btn btn-sm" style="background:#25D366;color:#fff;border-color:#25D366" ${!hasPhone?'disabled title="No WhatsApp number on file"':''} data-wa-fee="${r.s.id}" data-wa-cycle="${r.cycleKey}">📲 Send</button>`
           : '<span class="faint" style="font-size:12px">—</span>'}
         </td>
       </tr>`;
@@ -2728,7 +2741,7 @@ function viewAttendance(){
           </div>
         </td>
         <td>${isAbsent
-          ? `<button class="btn btn-sm" style="background:#25D366;color:#fff;border-color:#25D366" ${!hasPhone?'disabled title="No WhatsApp number on file"':''} data-wa-absent="${s.id}">📲 Send</button>`
+          ? `<button class="btn btn-sm" style="background:#25D366;color:#fff;border-color:#25D366" ${!hasPhone?'disabled title="No WhatsApp number on file"':''} data-wa-absent="${s.id}" data-wa-date="${dateVal}">📲 Send</button>`
           : '<span class="faint" style="font-size:12px">—</span>'}
         </td>
       </tr>`;
@@ -3005,7 +3018,7 @@ function viewWATemplates(){
   return `
   <div class="panel">
     <div class="panel-title mb8">📲 WhatsApp Message Templates</div>
-    <div class="muted mb12" style="font-size:12.5px">Manage message templates for fee reminders and absent notices. Mark one as default per type — it will be used when you click Send on the Payments or Attendance page.</div>
+    <div class="muted mb12" style="font-size:12.5px">Manage message templates for fee reminders and absent notices. Mark one as default per type — it will be used when you click Send on the Payments or Attendance page.<br/>Fee templates support <b>{month}</b> and <b>{year}</b> placeholders. Absent templates support <b>{date}</b> and <b>{day}</b> placeholders.</div>
     <div class="tabbar" style="margin-bottom:14px">
       <button class="tabbtn ${waTab==='fee'?'active':''}" data-wa-tab="fee">Fee Reminder</button>
       <button class="tabbtn ${waTab==='absent'?'active':''}" data-wa-tab="absent">Absent Notice</button>
@@ -3029,10 +3042,14 @@ function viewWATemplates(){
 function openWATemplateModal(id){
   const waTab = STATE.waTab || 'fee';
   const t = id ? (DATA.waTemplates||[]).find(x=>x.id===id) : null;
+  const hint = waTab==='fee'
+    ? 'Use <b>{month}</b> and <b>{year}</b> — e.g. <i>Fee for {month} {year} is due.</i>'
+    : 'Use <b>{date}</b> and <b>{day}</b> — e.g. <i>Your child was absent on {day}, {date}.</i>';
   openModal(t?'Edit template':'Add template',
     `<div class="form-grid full">
       <div class="field"><label>Template name</label><input name="tplName" value="${esc(t?t.name:'')}" placeholder="e.g. Polite reminder" /></div>
       <div class="field"><label>Message</label><textarea name="tplBody" style="min-height:100px">${esc(t?t.body:'')}</textarea></div>
+      <div class="hint">${hint}</div>
     </div>`,
     (fd)=>{
       const name=(fd.get('tplName')||'').trim(), body=(fd.get('tplBody')||'').trim();
@@ -3490,10 +3507,10 @@ function bindGlobalEvents(){
   }));
   /* WhatsApp send buttons */
   document.querySelectorAll('[data-wa-fee]').forEach(el=>el.addEventListener('click',()=>{
-    const s=findStudent(el.getAttribute('data-wa-fee')); if(s) sendWhatsApp(s.phone,'fee');
+    const s=findStudent(el.getAttribute('data-wa-fee')); if(s) sendWhatsApp(s.phone,'fee',{cycleKey:el.getAttribute('data-wa-cycle')});
   }));
   document.querySelectorAll('[data-wa-absent]').forEach(el=>el.addEventListener('click',()=>{
-    const s=findStudent(el.getAttribute('data-wa-absent')); if(s) sendWhatsApp(s.phone,'absent');
+    const s=findStudent(el.getAttribute('data-wa-absent')); if(s) sendWhatsApp(s.phone,'absent',{date:el.getAttribute('data-wa-date')});
   }));
 
   enhanceTables();
