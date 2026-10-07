@@ -2246,11 +2246,35 @@ function viewHomework(){
   if(f.status) list = list.filter(h=>h.status===f.status);
   if(f.cls) list = list.filter(h=>{ const st=findStudent(h.studentId); return st && st.class===f.cls; });
 
+  const all = DATA.homework;
+  const nPending   = all.filter(h=>h.status==='Pending').length;
+  const nSubmitted = all.filter(h=>h.status==='Submitted').length;
+  const nChecked   = all.filter(h=>h.status==='Checked').length;
+
+  const hwStatusControl = (h) => {
+    const s = h.status;
+    const btn = (label, val, activeStyle) =>
+      `<button class="btn btn-sm" style="${s===val ? activeStyle : ''}" data-hw-status="${val}" data-hw-id="${h.id}">${label}</button>`;
+    return `<div class="flex gap6" style="flex-wrap:nowrap">
+      ${btn('Pending',   'Pending',   'background:var(--red);color:#fff;border-color:var(--red)')}
+      ${btn('Submitted', 'Submitted', 'background:var(--gold);color:#fff;border-color:var(--gold)')}
+      ${btn('Checked',   'Checked',   'background:var(--green);color:#fff;border-color:var(--green)')}
+    </div>`;
+  };
+
   return `
   <div class="topbar">
-    <div><div class="page-title">Home Work</div><div class="page-sub">Assign, track, and follow up on homework</div></div>
+    <div><div class="page-title">Homework</div><div class="page-sub">Assign, track, and follow up on homework</div></div>
     <button class="btn btn-primary" id="btn-add-homework">+ Assign homework</button>
   </div>
+
+  <div class="stat-row">
+    <div class="stat-card" style="cursor:pointer" id="hw-stat-all"><div class="stat-label">Total</div><div class="stat-value">${all.length}</div></div>
+    <div class="stat-card" style="cursor:pointer" id="hw-stat-pending"><div class="stat-label">Pending</div><div class="stat-value red">${nPending}</div></div>
+    <div class="stat-card" style="cursor:pointer" id="hw-stat-submitted"><div class="stat-label">Submitted</div><div class="stat-value gold">${nSubmitted}</div></div>
+    <div class="stat-card" style="cursor:pointer" id="hw-stat-checked"><div class="stat-label">Checked</div><div class="stat-value green">${nChecked}</div></div>
+  </div>
+
   <div class="panel">
     <div class="flex gap8 mb12" style="flex-wrap:wrap">
       <select class="filter" id="hw-filter-class"><option value="">All classes</option>${CLASS_OPTIONS.map(c=>`<option ${f.cls===c?'selected':''}>${c}</option>`).join('')}</select>
@@ -2259,17 +2283,17 @@ function viewHomework(){
       <select class="filter" id="hw-filter-status"><option value="">All statuses</option>${['Pending','Submitted','Checked'].map(st=>`<option ${f.status===st?'selected':''}>${st}</option>`).join('')}</select>
     </div>
     ${list.length===0? emptyState("No homework matches these filters",""):
-    `<table><thead><tr><th>Assigned</th><th>Student</th><th>Subject</th><th>Teacher</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>
+    `<div class="table-responsive"><table><thead><tr><th>Assigned</th><th>Student</th><th>Subject</th><th>Teacher</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>
     ${list.map(h=>`<tr>
       <td class="num">${fmtDate(h.assignedDate)}</td>
       <td>${esc((findStudent(h.studentId)||{}).name||'—')}</td>
       <td>${esc(h.subject)}</td>
       <td>${esc((findTeacher(h.teacherId)||{}).name||'—')}</td>
       <td class="num">${fmtDate(h.dueDate)}</td>
-      <td>${statusBadge(h.status)}</td>
-      <td><button class="btn btn-sm btn-ghost" data-edit-homework="${h.id}">Open</button></td>
+      <td>${hwStatusControl(h)}</td>
+      <td><button class="btn btn-sm btn-ghost" data-edit-homework="${h.id}" title="Open detail">✎</button></td>
     </tr>`).join('')}
-    </tbody></table>`}
+    </tbody></table></div>`}
   </div>`;
 }
 function homeworkFormHTML(h){
@@ -3513,6 +3537,22 @@ function bindGlobalEvents(){
   const addHwBtn = document.getElementById('btn-add-homework');
   if(addHwBtn) addHwBtn.addEventListener('click',()=>openHomeworkModal(null));
   document.querySelectorAll('[data-edit-homework]').forEach(el=>el.addEventListener('click',()=>openHomeworkModal(el.getAttribute('data-edit-homework'))));
+  document.querySelectorAll('[data-hw-status]').forEach(el=>el.addEventListener('click',(e)=>{
+    e.stopPropagation();
+    const h = DATA.homework.find(x=>x.id===el.getAttribute('data-hw-id'));
+    if(!h) return;
+    h.status = el.getAttribute('data-hw-status');
+    save(STORE_KEYS.homework).then(render);
+  }));
+  ['hw-stat-all','hw-stat-pending','hw-stat-submitted','hw-stat-checked'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.addEventListener('click',()=>{
+      STATE.hwFilter = STATE.hwFilter||{};
+      STATE.hwFilter.status = id==='hw-stat-all' ? '' : id==='hw-stat-pending' ? 'Pending' : id==='hw-stat-submitted' ? 'Submitted' : 'Checked';
+      render();
+    });
+  });
   ['hw-filter-class','hw-filter-student','hw-filter-teacher','hw-filter-status'].forEach(id=>{
     const el = document.getElementById(id);
     if(el) el.addEventListener('change',()=>{
