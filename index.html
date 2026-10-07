@@ -597,7 +597,7 @@ function ensureWADefaults(){
       if(!DATA.waTemplates.some(t=>t.type===type)){
         DATA.waTemplates.push({id:uid(),...def,isDefault:true});
       }
-    } else if(!placeholders.some(p=>existing.body.includes(p))){
+    } else if(!placeholders.every(p=>existing.body.includes(p))){
       /* Default template exists but has no placeholders — update its body */
       existing.body = def.body;
       save(STORE_KEYS.waTemplates);
