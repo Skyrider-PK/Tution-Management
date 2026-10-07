@@ -581,15 +581,31 @@ const MONTH_NAMES = ["January","February","March","April","May","June","July","A
 const STORE_KEYS = {
   teachers:"teachers", students:"students", templates:"timetableTemplates",
   studentTT:"studentTimetables", homework:"homework", payments:"payments",
-  attendance:"attendance", tests:"testResults"
+  attendance:"attendance", tests:"testResults", waTemplates:"waTemplates"
 };
+const WA_DEFAULT_FEE = { name:"Fee Reminder", body:"Dear guardian, this is a reminder that the monthly fee is due. Please arrange payment at your earliest convenience. Thank you.", type:"fee" };
+const WA_DEFAULT_ABS = { name:"Absent Notice", body:"Dear guardian, your child was marked absent today. Please ensure regular attendance. Thank you.", type:"absent" };
+function getWATemplates(type){ return (DATA.waTemplates||[]).filter(t=>t.type===type); }
+function getDefaultWATemplate(type){ return (DATA.waTemplates||[]).find(t=>t.type===type && t.isDefault); }
+function ensureWADefaults(){
+  if(!DATA.waTemplates) DATA.waTemplates=[];
+  if(!DATA.waTemplates.some(t=>t.type==='fee')) DATA.waTemplates.push({id:uid(),...WA_DEFAULT_FEE,isDefault:true});
+  if(!DATA.waTemplates.some(t=>t.type==='absent')) DATA.waTemplates.push({id:uid(),...WA_DEFAULT_ABS,isDefault:true});
+}
+function sendWhatsApp(phone, type){
+  const tpl = getDefaultWATemplate(type);
+  if(!tpl){ showToast('Set a default template in Backup & Restore page first.'); return; }
+  const digits = (phone||'').replace(/\D/g,'');
+  if(!digits){ showToast('No WhatsApp number on file for this student.'); return; }
+  window.open('https://wa.me/'+digits+'?text='+encodeURIComponent(tpl.body), '_blank');
+}
 const AI_KEY_LS_PREFIX = "tuitionLedger_ai_";
 
 /* =========================================================
    STATE
 ========================================================= */
 /* aiKeys removed from DATA — stored only in localStorage under user-scoped keys */
-let DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[] };
+let DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], waTemplates:[] };
 let currentUser = null; /* Supabase Auth user object */
 let authReady = false;  /* true once onAuthStateChange has fired at least once */
 let STATE = { view:"dashboard", selectedId:null, detailTab:null, search:"", paymentsMonth:new Date(), attMonth:new Date(), hwFilter:{}, reportTab:"earnings", reportMonth:new Date() };
@@ -686,7 +702,7 @@ async function signOut(){
   render();
 }
 function resetDataInMemory(){
-  DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[] };
+  DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], waTemplates:[] };
 }
 
 /* ---- Realtime — user-scoped ---- */
@@ -978,7 +994,7 @@ function layoutShell(){
 ========================================================= */
 function renderLoginScreen(){
   return `
-  <div style="min-height:100vh;width:100vw;display:flex;align-items:center;justify-content:center;background:var(--navy);padding:20px 16px">
+  <div style="min-height:100vh;width:100%;display:flex;align-items:center;justify-content:center;background:var(--navy);padding:20px 16px;box-sizing:border-box">
     <div style="width:100%;max-width:400px">
 
       <!-- Brand header -->
@@ -991,27 +1007,27 @@ function renderLoginScreen(){
       </div>
 
       <!-- Card -->
-      <div style="background:#fff;border-radius:10px;padding:28px 28px 24px 28px;box-shadow:0 20px 60px rgba(0,0,0,0.35);width:100%">
+      <div style="background:#fff;border-radius:10px;padding:24px 20px 20px 20px;box-shadow:0 20px 60px rgba(0,0,0,0.35);width:100%">
 
         <div id="auth-error" class="alert-error" style="display:none"></div>
 
         <div class="field mb12">
           <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Email</label>
           <input type="email" id="auth-email" placeholder="you@example.com" autocomplete="email"
-            style="border:1.5px solid var(--border);border-radius:6px;padding:10px 12px;font-size:14px;width:100%;outline:none;transition:border-color .15s" />
+            style="border:1.5px solid var(--border);border-radius:6px;padding:12px 12px;font-size:16px;width:100%;outline:none;transition:border-color .15s;min-height:48px" />
         </div>
         <div class="field mb20">
           <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Password</label>
           <div style="position:relative">
             <input type="password" id="auth-password" placeholder="••••••••" autocomplete="current-password"
-              style="border:1.5px solid var(--border);border-radius:6px;padding:10px 40px 10px 12px;font-size:14px;width:100%;outline:none;transition:border-color .15s" />
+              style="border:1.5px solid var(--border);border-radius:6px;padding:12px 48px 12px 12px;font-size:16px;width:100%;outline:none;transition:border-color .15s;min-height:48px" />
             <button type="button" id="toggle-auth-password"
-              style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-faint);font-size:15px;padding:0;line-height:1">👁</button>
+              style="position:absolute;right:0;top:0;bottom:0;width:48px;background:none;border:none;cursor:pointer;color:var(--text-faint);font-size:16px;padding:0;line-height:1;display:flex;align-items:center;justify-content:center">👁</button>
           </div>
         </div>
 
         <button id="auth-submit"
-          style="width:100%;padding:11px;background:var(--navy);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;letter-spacing:0.2px">
+          style="width:100%;padding:14px;background:var(--navy);color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;letter-spacing:0.2px;min-height:50px">
           Sign In
         </button>
 
@@ -1026,10 +1042,10 @@ function renderLoginScreen(){
           <div class="field mb10">
             <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Your email</label>
             <input type="email" id="forgot-email" placeholder="you@example.com"
-              style="border:1.5px solid var(--border);border-radius:6px;padding:10px 12px;font-size:14px;width:100%;outline:none" />
+              style="border:1.5px solid var(--border);border-radius:6px;padding:12px 12px;font-size:16px;width:100%;outline:none;min-height:48px" />
           </div>
           <button id="forgot-submit"
-            style="width:100%;padding:10px;background:var(--gold);color:#fff;border:none;border-radius:6px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit">
+            style="width:100%;padding:14px;background:var(--gold);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;min-height:50px">
             Send Reset Email
           </button>
           <div id="forgot-msg" style="font-size:12px;margin-top:8px;text-align:center"></div>
@@ -1046,19 +1062,19 @@ function renderLoginScreen(){
           <div class="field mb12">
             <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Email</label>
             <input type="email" id="signup-email" placeholder="you@example.com" autocomplete="email"
-              style="border:1.5px solid var(--border);border-radius:6px;padding:10px 12px;font-size:14px;width:100%;outline:none" />
+              style="border:1.5px solid var(--border);border-radius:6px;padding:12px 12px;font-size:16px;width:100%;outline:none;min-height:48px" />
           </div>
           <div class="field mb16">
             <label style="font-size:12px;font-weight:600;color:var(--text-soft);letter-spacing:0.3px;text-transform:uppercase">Password</label>
             <div style="position:relative">
               <input type="password" id="signup-password" placeholder="••••••••" autocomplete="new-password"
-                style="border:1.5px solid var(--border);border-radius:6px;padding:10px 40px 10px 12px;font-size:14px;width:100%;outline:none" />
+                style="border:1.5px solid var(--border);border-radius:6px;padding:12px 48px 12px 12px;font-size:16px;width:100%;outline:none;min-height:48px" />
               <button type="button" id="toggle-signup-password"
-                style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-faint);font-size:15px;padding:0;line-height:1">👁</button>
+                style="position:absolute;right:0;top:0;bottom:0;width:48px;background:none;border:none;cursor:pointer;color:var(--text-faint);font-size:16px;padding:0;line-height:1;display:flex;align-items:center;justify-content:center">👁</button>
             </div>
           </div>
           <button id="signup-submit"
-            style="width:100%;padding:11px;background:var(--gold);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">
+            style="width:100%;padding:14px;background:var(--gold);color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;min-height:50px">
             Create Account
           </button>
           <div id="signup-note" style="display:none;font-size:12px;color:var(--text-soft);margin-top:10px;text-align:center;line-height:1.5">Check your email to confirm your account, then sign in.</div>
@@ -1465,7 +1481,7 @@ function studentFormHTML(s){
     <div class="field"><label>Full name</label><input name="name" value="${esc(s.name)}" required /></div>
     <div class="field"><label>Class</label><select name="class">${CLASS_OPTIONS.map(c=>`<option ${s.class===c?'selected':''}>${c}</option>`).join('')}</select></div>
     <div class="field"><label>Guardian name</label><input name="guardianName" value="${esc(s.guardianName)}" /></div>
-    <div class="field"><label>Phone</label><input name="phone" value="${esc(s.phone)}" /></div>
+    <div class="field"><label>Phone / WhatsApp</label><input name="phone" value="${esc(s.phone)}" placeholder="e.g. 03001234567" /></div>
     <div class="field span2"><label>Address</label><input name="address" value="${esc(s.address)}" /></div>
     <div class="field"><label>Total monthly fee (Rs)</label><input name="totalFee" type="number" min="0" value="${s.totalFee!==undefined?s.totalFee:''}" required /></div>
     <div class="field"><label>Fee cycle start day</label><input name="feeCycleStartDay" type="number" min="1" max="31" value="${s.feeCycleStartDay||1}" />
@@ -2637,15 +2653,23 @@ function viewPayments(){
   <div class="panel">
     <div class="panel-title mb12">Student fee status — ${label}</div>
     ${rows.length===0? emptyState("No students yet",""):
-    `<table><thead><tr><th>Student</th><th>Cycle</th><th>Total fee</th><th>Due</th><th>Status</th><th>Mark as</th></tr></thead><tbody>
-    ${rows.map(r=>`<tr>
-      <td>${esc(r.s.name)}</td>
-      <td class="num" style="font-size:12px">${fmtDate(r.cycleStart)} – ${fmtDate(r.cycleEnd)}</td>
-      <td class="num">${money(r.fee)}</td>
-      <td class="num">${money(r.due)}</td>
-      <td>${statusBadge(r.status)}</td>
-      <td>${statusControl(r.s.id, r.cycleKey, r.status==='Paid')}</td>
-    </tr>`).join('')}
+    `<table><thead><tr><th>Student</th><th>Cycle</th><th>Total fee</th><th>Due</th><th>Status</th><th>Mark as</th><th>WhatsApp</th></tr></thead><tbody>
+    ${rows.map(r=>{
+      const hasPhone = !!(r.s.phone||'').replace(/\D/g,'');
+      const waDue = r.status!=='Paid';
+      return `<tr>
+        <td>${esc(r.s.name)}</td>
+        <td class="num" style="font-size:12px">${fmtDate(r.cycleStart)} – ${fmtDate(r.cycleEnd)}</td>
+        <td class="num">${money(r.fee)}</td>
+        <td class="num">${money(r.due)}</td>
+        <td>${statusBadge(r.status)}</td>
+        <td>${statusControl(r.s.id, r.cycleKey, r.status==='Paid')}</td>
+        <td>${waDue
+          ? `<button class="btn btn-sm" style="background:#25D366;color:#fff;border-color:#25D366" ${!hasPhone?'disabled title="No WhatsApp number on file"':''} data-wa-fee="${r.s.id}">📲 Send</button>`
+          : '<span class="faint" style="font-size:12px">—</span>'}
+        </td>
+      </tr>`;
+    }).join('')}
     </tbody></table>`}
   </div>
   `;
@@ -2691,16 +2715,24 @@ function viewAttendance(){
       <div class="field" style="max-width:240px"><label>Teacher</label><select id="att-teacher">${DATA.teachers.map(t=>`<option value="${t.id}" ${teacherId===t.id?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div>
     </div>
     ${relevantStudents.length===0? emptyState("No students linked to this teacher",""):
-    `<table><thead><tr><th>Student</th><th>Class</th><th>Status</th></tr></thead><tbody>
-    ${relevantStudents.map(s=>`<tr>
-      <td>${esc(s.name)}</td><td>${esc(s.class)}</td>
-      <td>
-        <div class="flex gap6">
-          <button class="btn btn-sm ${marks[s.id]==='Present'?'btn-primary':''}" data-mark-att data-student="${s.id}" data-status="Present">Present</button>
-          <button class="btn btn-sm ${marks[s.id]==='Absent'?'btn-danger':''}" data-mark-att data-student="${s.id}" data-status="Absent">Absent</button>
-        </div>
-      </td>
-    </tr>`).join('')}
+    `<table><thead><tr><th>Student</th><th>Class</th><th>Status</th><th>WhatsApp</th></tr></thead><tbody>
+    ${relevantStudents.map(s=>{
+      const isAbsent = marks[s.id]==='Absent';
+      const hasPhone = !!(s.phone||'').replace(/\D/g,'');
+      return `<tr>
+        <td>${esc(s.name)}</td><td>${esc(s.class)}</td>
+        <td>
+          <div class="flex gap6">
+            <button class="btn btn-sm ${marks[s.id]==='Present'?'btn-primary':''}" data-mark-att data-student="${s.id}" data-status="Present">Present</button>
+            <button class="btn btn-sm ${isAbsent?'btn-danger':''}" data-mark-att data-student="${s.id}" data-status="Absent">Absent</button>
+          </div>
+        </td>
+        <td>${isAbsent
+          ? `<button class="btn btn-sm" style="background:#25D366;color:#fff;border-color:#25D366" ${!hasPhone?'disabled title="No WhatsApp number on file"':''} data-wa-absent="${s.id}">📲 Send</button>`
+          : '<span class="faint" style="font-size:12px">—</span>'}
+        </td>
+      </tr>`;
+    }).join('')}
     </tbody></table>`}
   </div>
   <div class="panel">
@@ -2959,7 +2991,58 @@ REVOKE ALL ON tuition_ledger FROM anon;</pre>
     <div class="muted mb12" style="font-size:13px">Permanently clears <b>your</b> records only. Other users are not affected. This cannot be undone — export a backup first.</div>
     <button class="btn btn-danger" id="btn-reset">Clear my data</button>
   </div>
+
+  ${viewWATemplates()}
   `;
+}
+/* =========================================================
+   WHATSAPP TEMPLATES
+========================================================= */
+function viewWATemplates(){
+  ensureWADefaults();
+  const waTab = STATE.waTab || 'fee';
+  const list = getWATemplates(waTab);
+  return `
+  <div class="panel">
+    <div class="panel-title mb8">📲 WhatsApp Message Templates</div>
+    <div class="muted mb12" style="font-size:12.5px">Manage message templates for fee reminders and absent notices. Mark one as default per type — it will be used when you click Send on the Payments or Attendance page.</div>
+    <div class="tabbar" style="margin-bottom:14px">
+      <button class="tabbtn ${waTab==='fee'?'active':''}" data-wa-tab="fee">Fee Reminder</button>
+      <button class="tabbtn ${waTab==='absent'?'active':''}" data-wa-tab="absent">Absent Notice</button>
+    </div>
+    <button class="btn btn-sm btn-primary mb12" id="btn-add-wa-tpl">+ Add template</button>
+    ${list.length===0? emptyState('No templates yet','Add one above.') :
+    list.map(t=>`
+      <div style="border:1px solid ${t.isDefault?'var(--green)':'var(--border)'};border-radius:6px;padding:12px 14px;margin-bottom:10px;background:${t.isDefault?'var(--green-soft)':'#fff'}">
+        <div class="flex-between mb6">
+          <div style="font-weight:600;font-size:13.5px">${esc(t.name)} ${t.isDefault?'<span class="badge badge-green" style="font-size:11px">Default</span>':''}</div>
+          <div class="flex gap6">
+            ${!t.isDefault?`<button class="btn btn-sm" data-wa-set-default="${t.id}">Set default</button>`:''}
+            <button class="btn btn-sm" data-wa-edit="${t.id}">Edit</button>
+            <button class="btn btn-sm btn-danger" data-wa-delete="${t.id}">Delete</button>
+          </div>
+        </div>
+        <div style="font-size:13px;color:var(--text-soft);white-space:pre-wrap">${esc(t.body)}</div>
+      </div>`).join('')}
+  </div>`;
+}
+function openWATemplateModal(id){
+  const waTab = STATE.waTab || 'fee';
+  const t = id ? (DATA.waTemplates||[]).find(x=>x.id===id) : null;
+  openModal(t?'Edit template':'Add template',
+    `<div class="form-grid full">
+      <div class="field"><label>Template name</label><input name="tplName" value="${esc(t?t.name:'')}" placeholder="e.g. Polite reminder" /></div>
+      <div class="field"><label>Message</label><textarea name="tplBody" style="min-height:100px">${esc(t?t.body:'')}</textarea></div>
+    </div>`,
+    (fd)=>{
+      const name=(fd.get('tplName')||'').trim(), body=(fd.get('tplBody')||'').trim();
+      if(!name) return 'Template name is required.';
+      if(!body) return 'Message body is required.';
+      if(!DATA.waTemplates) DATA.waTemplates=[];
+      if(t){ t.name=name; t.body=body; }
+      else DATA.waTemplates.push({id:uid(), name, body, type:waTab, isDefault:DATA.waTemplates.filter(x=>x.type===waTab).length===0});
+      save(STORE_KEYS.waTemplates).then(()=>{ closeModal(); render(); });
+    });
 }
 async function handleSupabaseSave(){
   const cfg = {
@@ -3385,6 +3468,34 @@ function bindGlobalEvents(){
   if(importFile) importFile.addEventListener('change',(e)=>{ if(e.target.files[0]) importBackup(e.target.files[0]); });
   const resetBtn = document.getElementById('btn-reset');
   if(resetBtn) resetBtn.addEventListener('click', resetAllData);
+
+  /* WhatsApp template events */
+  document.querySelectorAll('[data-wa-tab]').forEach(el=>el.addEventListener('click',()=>{ STATE.waTab=el.getAttribute('data-wa-tab'); render(); }));
+  const addWaTpl = document.getElementById('btn-add-wa-tpl');
+  if(addWaTpl) addWaTpl.addEventListener('click',()=>openWATemplateModal(null));
+  document.querySelectorAll('[data-wa-edit]').forEach(el=>el.addEventListener('click',()=>openWATemplateModal(el.getAttribute('data-wa-edit'))));
+  document.querySelectorAll('[data-wa-delete]').forEach(el=>el.addEventListener('click',()=>{
+    const id=el.getAttribute('data-wa-delete');
+    if(!confirm('Delete this template?')) return;
+    DATA.waTemplates=(DATA.waTemplates||[]).filter(t=>t.id!==id);
+    save(STORE_KEYS.waTemplates).then(()=>render());
+  }));
+  document.querySelectorAll('[data-wa-set-default]').forEach(el=>el.addEventListener('click',()=>{
+    const id=el.getAttribute('data-wa-set-default');
+    const tpl=(DATA.waTemplates||[]).find(t=>t.id===id);
+    if(!tpl) return;
+    DATA.waTemplates.forEach(t=>{ if(t.type===tpl.type) t.isDefault=false; });
+    tpl.isDefault=true;
+    save(STORE_KEYS.waTemplates).then(()=>render());
+  }));
+  /* WhatsApp send buttons */
+  document.querySelectorAll('[data-wa-fee]').forEach(el=>el.addEventListener('click',()=>{
+    const s=findStudent(el.getAttribute('data-wa-fee')); if(s) sendWhatsApp(s.phone,'fee');
+  }));
+  document.querySelectorAll('[data-wa-absent]').forEach(el=>el.addEventListener('click',()=>{
+    const s=findStudent(el.getAttribute('data-wa-absent')); if(s) sendWhatsApp(s.phone,'absent');
+  }));
+
   enhanceTables();
 }
 function renderDashboardSearchOnly(){
@@ -3435,6 +3546,7 @@ async function init(){
     authReady = true;
   }
   await loadAll();
+  ensureWADefaults();
   if(currentUser) subscribeSupabase();
   render();
 }
