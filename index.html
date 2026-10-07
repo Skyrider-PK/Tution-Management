@@ -577,11 +577,11 @@ const CLASS_OPTIONS = ["Play Group","Nursery","K.G 1 (KG-1)","K.G 2 (KG-2)","Pre
 const WEEKDAYS = ["Mon","Tue","Wed","Thu","Fri","Sat"];
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-/* aiKeys is intentionally excluded — AI keys are local-only and never sent to Supabase */
 const STORE_KEYS = {
   teachers:"teachers", students:"students", templates:"timetableTemplates",
   studentTT:"studentTimetables", homework:"homework", payments:"payments",
-  attendance:"attendance", tests:"testResults", waTemplates:"waTemplates"
+  attendance:"attendance", tests:"testResults", waTemplates:"waTemplates",
+  aiKeys:"aiKeys"
 };
 const WA_DEFAULT_FEE = { name:"Fee Reminder", body:"Dear guardian, this is a reminder that the fee for {month} {year} is due. Please arrange payment at your earliest convenience. Thank you.", type:"fee" };
 const WA_DEFAULT_ABS = { name:"Absent Notice", body:"Dear guardian, your child was marked absent on {day}, {date}. Please ensure regular attendance. Thank you.", type:"absent" };
@@ -624,13 +624,13 @@ function sendWhatsApp(phone, type, ctx){
   }
   window.open('https://wa.me/'+digits+'?text='+encodeURIComponent(msg), '_blank');
 }
-const AI_KEY_LS_PREFIX = "tuitionLedger_ai_";
+
 
 /* =========================================================
    STATE
 ========================================================= */
 /* aiKeys removed from DATA — stored only in localStorage under user-scoped keys */
-let DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], waTemplates:[] };
+let DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], waTemplates:[], aiKeys:{} };
 let currentUser = null; /* Supabase Auth user object */
 let authReady = false;  /* true once onAuthStateChange has fired at least once */
 let STATE = { view:"dashboard", selectedId:null, detailTab:null, search:"", paymentsMonth:new Date(), attMonth:new Date(), hwFilter:{}, reportTab:"earnings", reportMonth:new Date() };
@@ -727,7 +727,7 @@ async function signOut(){
   render();
 }
 function resetDataInMemory(){
-  DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], waTemplates:[] };
+  DATA = { teachers:[], students:[], templates:[], studentTT:{}, homework:[], payments:[], attendance:[], tests:[], waTemplates:[], aiKeys:{} };
 }
 
 /* ---- Realtime — user-scoped ---- */
@@ -2271,18 +2271,16 @@ const AI_PROVIDERS = {
   nvidia:      { label:'NVIDIA',                   lsKey:'tuitionManager_ai_nvidia',      vision:true,  defaultModel:'nvidia/llama-3.2-11b-vision-instruct' }
 };
 
-/* ---- AI keys: local-only, user-scoped, never in DATA or Supabase ---- */
+/* ---- AI keys: stored in DATA.aiKeys and synced to Supabase like all other data ---- */
 function getStoredApiKey(providerId){
-  if(!currentUser) return '';
-  try{ return localStorage.getItem(AI_KEY_LS_PREFIX + currentUser.id + '_' + providerId) || ''; }catch(e){ return ''; }
+  return (DATA.aiKeys && DATA.aiKeys[providerId]) || '';
 }
 function saveApiKey(providerId, key){
-  if(!AI_PROVIDERS[providerId] || !currentUser) return;
-  try{
-    if(key) localStorage.setItem(AI_KEY_LS_PREFIX + currentUser.id + '_' + providerId, key);
-    else localStorage.removeItem(AI_KEY_LS_PREFIX + currentUser.id + '_' + providerId);
-  }catch(e){}
-  render();
+  if(!AI_PROVIDERS[providerId]) return;
+  if(!DATA.aiKeys) DATA.aiKeys = {};
+  if(key) DATA.aiKeys[providerId] = key;
+  else delete DATA.aiKeys[providerId];
+  save(STORE_KEYS.aiKeys).then(()=>render());
 }
 function removeApiKey(providerId){ saveApiKey(providerId, ''); }
 function configuredProviders(){ return Object.keys(AI_PROVIDERS).filter(id=>getStoredApiKey(id)); }
@@ -2482,7 +2480,7 @@ function viewAIHelper(){
       <div class="panel">
         <div class="panel-title mb8">Configure API Key</div>
         <div class="muted mb12" style="font-size:12.5px">
-          <b>Security notice:</b> API keys are stored only in <b>this browser's localStorage</b>, scoped to your account. They are never sent to Supabase or included in backups. They are sent directly from your browser to the AI provider's API only. Restrict your keys using the provider's API restrictions where available, and monitor your usage regularly.
+          <b>Security notice:</b> API keys are stored in your Supabase database, encrypted at rest and protected by Row Level Security — only your account can access them. They are sent directly from your browser to the AI provider's API only. Restrict your keys using the provider's API restrictions where available, and monitor your usage regularly.
           <br/><br/>Availability of free usage depends on the provider's current pricing and account terms.
         </div>
         <div class="field mb8"><label>Provider</label>
@@ -3125,9 +3123,8 @@ function handleSupabaseDisconnect(){
   render();
 }
 function exportBackup(){
-  /* aiKeys intentionally excluded — never export credentials */
   const exportData = {};
-  Object.keys(STORE_KEYS).forEach(k=>{ exportData[k] = DATA[k]; });
+  Object.keys(STORE_KEYS).forEach(k=>{ if(k!=='aiKeys') exportData[k] = DATA[k]; });
   const blob = new Blob([JSON.stringify(exportData,null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -3461,14 +3458,14 @@ function bindGlobalEvents(){
     const pid = (document.getElementById('ai-settings-provider')||{}).value;
     const val = (document.getElementById('ai-settings-key')||{}).value.trim();
     if(!pid||!val){ showToast('Select a provider and paste a key first.'); return; }
-    saveApiKey(pid, val); showToast((AI_PROVIDERS[pid]||{}).label+' key saved'); render();
+    saveApiKey(pid, val); showToast((AI_PROVIDERS[pid]||{}).label+' key saved');
   });
   // Remove key
   const aiKeyRemove = document.getElementById('ai-key-remove');
   if(aiKeyRemove) aiKeyRemove.addEventListener('click',()=>{
     const pid = (document.getElementById('ai-settings-provider')||{}).value;
     if(!pid) return;
-    removeApiKey(pid); showToast((AI_PROVIDERS[pid]||{}).label+' key removed'); render();
+    removeApiKey(pid); showToast((AI_PROVIDERS[pid]||{}).label+' key removed');
   });
   // Test key
   const aiKeyTest = document.getElementById('ai-key-test');
